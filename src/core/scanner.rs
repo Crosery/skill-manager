@@ -103,13 +103,6 @@ impl Scanner {
 
             match db.insert_resource(&resource) {
                 Ok(_) => {
-                    // Check which CLIs have symlinks pointing to this skill
-                    for target in CliTarget::ALL {
-                        let link = target.skills_dir().join(&name);
-                        if Linker::is_our_symlink(&link, paths.data_dir()) {
-                            let _ = db.set_target_enabled(&resource.id, *target, true);
-                        }
-                    }
                     result.adopted += 1;
                 }
                 Err(e) => result.errors.push(format!("{name}: {e}")),
@@ -149,10 +142,7 @@ impl Scanner {
 
             match Linker::detect_entry_type(&entry_path, paths.data_dir()) {
                 EntryType::OurSymlink => {
-                    // Already managed — just ensure enabled flag is set, don't count
-                    if let Some(id) = Self::find_resource_id_by_name(db, &name) {
-                        let _ = db.set_target_enabled(&id, target, true);
-                    }
+                    // Already managed — symlink existence IS the enabled state
                 }
                 EntryType::ForeignSymlink | EntryType::RealDir => {
                     match Self::adopt_entry(&entry_path, &name, paths, db, target) {
