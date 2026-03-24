@@ -80,15 +80,19 @@ impl SkillManager {
         let resource = self.db.get_resource(resource_id)?
             .ok_or_else(|| anyhow::anyhow!("resource not found: {resource_id}"))?;
 
-        let cli_dir = cli_dir_override
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| target.skills_dir());
-
-        std::fs::create_dir_all(&cli_dir)?;
-        let link_path = cli_dir.join(&resource.name);
-
-        if !link_path.exists() {
-            Linker::create_link(&resource.directory, &link_path)?;
+        if resource.kind == ResourceKind::Mcp {
+            // MCP: set disabled=false in CLI config file
+            Self::set_mcp_disabled(&resource.name, target, false)?;
+        } else {
+            // Skill: create symlink
+            let cli_dir = cli_dir_override
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| target.skills_dir());
+            std::fs::create_dir_all(&cli_dir)?;
+            let link_path = cli_dir.join(&resource.name);
+            if !link_path.exists() {
+                Linker::create_link(&resource.directory, &link_path)?;
+            }
         }
 
         self.db.set_target_enabled(resource_id, target, true)?;
@@ -104,17 +108,50 @@ impl SkillManager {
         let resource = self.db.get_resource(resource_id)?
             .ok_or_else(|| anyhow::anyhow!("resource not found: {resource_id}"))?;
 
-        let cli_dir = cli_dir_override
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| target.skills_dir());
-
-        let link_path = cli_dir.join(&resource.name);
-
-        if Linker::is_our_symlink(&link_path, self.paths.data_dir()) {
-            Linker::remove_link(&link_path)?;
+        if resource.kind == ResourceKind::Mcp {
+            // MCP: set disabled=true in CLI config file
+            Self::set_mcp_disabled(&resource.name, target, true)?;
+        } else {
+            // Skill: remove symlink
+            let cli_dir = cli_dir_override
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| target.skills_dir());
+            let link_path = cli_dir.join(&resource.name);
+            if Linker::is_our_symlink(&link_path, self.paths.data_dir()) {
+                Linker::remove_link(&link_path)?;
+            }
         }
 
         self.db.set_target_enabled(resource_id, target, false)?;
+        Ok(())
+    }
+
+    /// Set `disabled` field on an MCP server in a CLI's config file.
+    fn set_mcp_disabled(mcp_name: &str, target: CliTarget, disabled: bool) -> Result<()> {
+        let home = dirs::home_dir().unwrap_or_default();
+        let config_path = match target {
+            CliTarget::Claude => home.join(".claude.json"),
+            CliTarget::Gemini => home.join(".gemini/settings.json"),
+            CliTarget::Codex => home.join(".codex/settings.json"),
+            CliTarget::OpenCode => home.join(".opencode/settings.json"),
+        };
+
+        if !config_path.exists() { return Ok(()); }
+
+        let content = std::fs::read_to_string(&config_path)?;
+        let mut config: serde_json::Value = serde_json::from_str(&content)?;
+
+        if let Some(servers) = config.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
+            if let Some(server) = servers.get_mut(mcp_name).and_then(|s| s.as_object_mut()) {
+                if disabled {
+                    server.insert("disabled".into(), serde_json::Value::Bool(true));
+                } else {
+                    server.remove("disabled");
+                }
+                std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+            }
+        }
+
         Ok(())
     }
 
