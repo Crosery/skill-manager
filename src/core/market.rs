@@ -161,31 +161,27 @@ fn cache_key(source: &SourceEntry) -> String {
     format!("{}_{}", source.owner, source.repo)
 }
 
+pub struct ExtractResult {
+    pub skills: Vec<MarketSkill>,
+    pub plugin_detected: bool,
+}
+
 pub struct Market;
 
 impl Market {
-    /// Fetch skill list from GitHub API.
-    pub async fn fetch(source: &SourceEntry) -> Result<Vec<MarketSkill>> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
-            source.owner, source.repo, source.branch,
-        );
-
-        let client = reqwest::Client::builder()
-            .user_agent("skill-manager/0.1")
-            .build()?;
-
-        let resp = client.get(&url).send().await?;
-        if !resp.status().is_success() {
-            bail!("GitHub API {} for {}/{}", resp.status(), source.owner, source.repo);
-        }
-
-        let body: GitTree = resp.json().await?;
+    /// Extract skills from a git tree. Also detects .claude-plugin format.
+    pub(crate) fn extract_skills(tree: &GitTree, source: &SourceEntry) -> ExtractResult {
         let label = &source.label;
         let repo_id = source.repo_id();
         let mut skills = Vec::new();
+        let mut plugin_detected = false;
 
-        for node in &body.tree {
+        for node in &tree.tree {
+            if node.path.contains(".claude-plugin") {
+                plugin_detected = true;
+                continue;
+            }
+
             if !node.path.ends_with("/SKILL.md") && node.path != "SKILL.md" {
                 continue;
             }
@@ -226,7 +222,28 @@ impl Market {
 
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         skills.dedup_by(|a, b| a.name == b.name);
-        Ok(skills)
+        ExtractResult { skills, plugin_detected }
+    }
+
+    /// Fetch skill list from GitHub API.
+    pub async fn fetch(source: &SourceEntry) -> Result<Vec<MarketSkill>> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+            source.owner, source.repo, source.branch,
+        );
+
+        let client = reqwest::Client::builder()
+            .user_agent("skill-manager/0.1")
+            .build()?;
+
+        let resp = client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            bail!("GitHub API {} for {}/{}", resp.status(), source.owner, source.repo);
+        }
+
+        let body: GitTree = resp.json().await?;
+        let result = Self::extract_skills(&body, source);
+        Ok(result.skills)
     }
 
     /// Install a single skill: download the entire skill directory from GitHub.
@@ -322,13 +339,13 @@ impl Market {
 }
 
 #[derive(Deserialize)]
-struct GitTree {
-    tree: Vec<GitTreeNode>,
+pub(crate) struct GitTree {
+    pub(crate) tree: Vec<GitTreeNode>,
 }
 
 #[derive(Deserialize)]
-struct GitTreeNode {
-    path: String,
+pub(crate) struct GitTreeNode {
+    pub(crate) path: String,
 }
 
 #[derive(Deserialize)]
@@ -337,4 +354,35 @@ struct GitHubContentItem {
     path: String,
     #[serde(rename = "type")]
     item_type: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fetch_detects_claude_plugin_format() {
+        let tree = GitTree {
+            tree: vec![
+                GitTreeNode { path: ".claude-plugin/plugin.json".into() },
+                GitTreeNode { path: "README.md".into() },
+                GitTreeNode { path: "skills/brainstorming/SKILL.md".into() },
+            ],
+        };
+
+        let source = SourceEntry {
+            owner: "test".into(),
+            repo: "test-plugin".into(),
+            branch: "main".into(),
+            skill_prefix: String::new(),
+            label: "Test".into(),
+            description: "test".into(),
+            builtin: false,
+            enabled: true,
+        };
+
+        let result = Market::extract_skills(&tree, &source);
+        assert!(result.plugin_detected);
+        assert_eq!(result.skills.len(), 1);
+    }
 }

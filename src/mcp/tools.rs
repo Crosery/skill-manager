@@ -375,6 +375,14 @@ impl SmServer {
             }
         }
 
+        if all_skills.is_empty() {
+            if let Some(ref search) = p.search {
+                return Json(TextResult {
+                    result: format!("No skills matching '{}'. Use sm_sources to check available sources.", search)
+                });
+            }
+        }
+
         Json(TextResult { result: serde_json::to_string_pretty(&all_skills).unwrap_or_default() })
     }
 
