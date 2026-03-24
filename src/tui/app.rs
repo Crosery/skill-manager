@@ -184,7 +184,6 @@ impl App {
             }
         }
         if changed {
-            self.mgr.sync_mcp_status();
             self.reload();
         }
     }

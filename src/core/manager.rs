@@ -81,7 +81,7 @@ impl SkillManager {
             .ok_or_else(|| anyhow::anyhow!("resource not found: {resource_id}"))?;
 
         if resource.kind == ResourceKind::Mcp {
-            // MCP: set disabled=false in CLI config file
+            // MCP: set disabled=false in CLI config file (no DB write)
             Self::set_mcp_disabled(&resource.name, target, false)?;
         } else {
             // Skill: create symlink
@@ -93,9 +93,9 @@ impl SkillManager {
             if !link_path.exists() {
                 Linker::create_link(&resource.directory, &link_path)?;
             }
+            self.db.set_target_enabled(resource_id, target, true)?;
         }
 
-        self.db.set_target_enabled(resource_id, target, true)?;
         Ok(())
     }
 
@@ -109,7 +109,7 @@ impl SkillManager {
             .ok_or_else(|| anyhow::anyhow!("resource not found: {resource_id}"))?;
 
         if resource.kind == ResourceKind::Mcp {
-            // MCP: set disabled=true in CLI config file
+            // MCP: set disabled=true in CLI config file (no DB write)
             Self::set_mcp_disabled(&resource.name, target, true)?;
         } else {
             // Skill: remove symlink
@@ -120,9 +120,9 @@ impl SkillManager {
             if Linker::is_our_symlink(&link_path, self.paths.data_dir()) {
                 Linker::remove_link(&link_path)?;
             }
+            self.db.set_target_enabled(resource_id, target, false)?;
         }
 
-        self.db.set_target_enabled(resource_id, target, false)?;
         Ok(())
     }
 
@@ -155,9 +155,9 @@ impl SkillManager {
         Ok(())
     }
 
-    /// Sync MCP enabled status from CLI config files into DB.
-    /// Call this before displaying MCP status to reflect external changes.
-    pub fn sync_mcp_status(&self) {
+    /// Read MCP enabled/disabled status directly from CLI config files.
+    /// Returns mcp_name -> { target -> enabled }.
+    pub fn read_mcp_status_from_configs() -> HashMap<String, HashMap<CliTarget, bool>> {
         let home = dirs::home_dir().unwrap_or_default();
         let configs: &[(CliTarget, &str)] = &[
             (CliTarget::Claude, ".claude.json"),
@@ -165,6 +165,8 @@ impl SkillManager {
             (CliTarget::Codex, ".codex/settings.json"),
             (CliTarget::OpenCode, ".opencode/settings.json"),
         ];
+
+        let mut result: HashMap<String, HashMap<CliTarget, bool>> = HashMap::new();
 
         for (target, rel) in configs {
             let path = home.join(rel);
@@ -182,11 +184,14 @@ impl SkillManager {
             };
             for (name, server) in servers {
                 if name.starts_with('_') { continue; }
-                let id = format!("mcp:{name}");
                 let disabled = server.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
-                let _ = self.db.set_target_enabled(&id, *target, !disabled);
+                result.entry(name.clone())
+                    .or_default()
+                    .insert(*target, !disabled);
             }
         }
+
+        result
     }
 
     pub fn list_resources(
@@ -194,7 +199,31 @@ impl SkillManager {
         kind: Option<ResourceKind>,
         enabled_for: Option<CliTarget>,
     ) -> Result<Vec<Resource>> {
-        self.db.list_resources(kind, enabled_for)
+        let mut resources = self.db.list_resources(kind, enabled_for)?;
+        let mcp_status = Self::read_mcp_status_from_configs();
+
+        for res in &mut resources {
+            if res.kind == ResourceKind::Mcp {
+                if let Some(targets) = mcp_status.get(&res.name) {
+                    res.enabled = targets.clone();
+                } else {
+                    res.enabled = HashMap::new();
+                }
+            }
+        }
+
+        // If filtering by enabled_for, re-filter MCPs based on config status
+        if let Some(target) = enabled_for {
+            resources.retain(|r| {
+                if r.kind == ResourceKind::Mcp {
+                    r.enabled.get(&target).copied().unwrap_or(false)
+                } else {
+                    true
+                }
+            });
+        }
+
+        Ok(resources)
     }
 
     pub fn uninstall(&self, resource_id: &str) -> Result<()> {
@@ -285,7 +314,12 @@ impl SkillManager {
     }
 
     pub fn status(&self, target: CliTarget) -> Result<(usize, usize)> {
-        self.db.enabled_count(target)
+        let skills = self.db.enabled_skill_count(target)?;
+        let mcp_status = Self::read_mcp_status_from_configs();
+        let mcps = mcp_status.values()
+            .filter(|targets| targets.get(&target).copied().unwrap_or(false))
+            .count();
+        Ok((skills, mcps))
     }
 
     // --- Internal ---
@@ -337,10 +371,7 @@ impl SkillManager {
                 count += 1;
             }
 
-            // Sync enabled status from the CLI config
-            let target = CliTarget::from_str(&entry.source_cli)
-                .unwrap_or(CliTarget::Claude);
-            let _ = self.db.set_target_enabled(&id, target, !entry.disabled);
+            // MCP enabled status is read from CLI config at query time — no DB write needed
         }
         count
     }

@@ -263,16 +263,22 @@ impl Database {
     }
 
     pub fn enabled_count(&self, target: CliTarget) -> Result<(usize, usize)> {
-        let skills: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM resources r JOIN resource_targets rt ON r.id = rt.resource_id
-             WHERE r.kind = 'skill' AND rt.cli_target = ?1 AND rt.enabled = 1",
-            params![target.name()], |r| r.get(0)
-        )?;
+        let skills = self.enabled_skill_count(target)?;
         let mcps: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM resources r JOIN resource_targets rt ON r.id = rt.resource_id
              WHERE r.kind = 'mcp' AND rt.cli_target = ?1 AND rt.enabled = 1",
             params![target.name()], |r| r.get(0)
         )?;
-        Ok((skills as usize, mcps as usize))
+        Ok((skills, mcps as usize))
+    }
+
+    /// Count only enabled skills for a target (MCP status is read from config files).
+    pub fn enabled_skill_count(&self, target: CliTarget) -> Result<usize> {
+        let skills: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM resources r JOIN resource_targets rt ON r.id = rt.resource_id
+             WHERE r.kind = 'skill' AND rt.cli_target = ?1 AND rt.enabled = 1",
+            params![target.name()], |r| r.get(0)
+        )?;
+        Ok(skills as usize)
     }
 }
