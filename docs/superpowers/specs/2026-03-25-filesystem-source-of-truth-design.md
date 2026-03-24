@@ -65,7 +65,8 @@ list → read DB for metadata → check symlink existence for each CLI target �
 
 Changes:
 - `Resource.enabled` is populated by checking `{cli_skills_dir}/{name}` symlink existence for each CLI target, not from `resource_targets` table.
-- `enable_resource` creates symlink only. `disable_resource` removes symlink only. No `db.set_target_enabled()` calls anywhere (remove from `scanner.rs` too).
+- `enable_resource` creates symlink only. `disable_resource` removes symlink only.
+- **Remove all `db.set_target_enabled()` calls**: `manager.rs:96`, `manager.rs:123`, `scanner.rs:110`, `scanner.rs:154`. These are the only 4 call sites.
 - `resource_targets` table is deleted from schema.
 - `enabled_skill_count(target)` counts symlinks in `target.skills_dir()` that point into `~/.skill-manager/skills/`.
 
@@ -106,7 +107,12 @@ Groups can contain both skills and MCPs. Since MCPs are no longer in the `resour
 - For each `resource_id`:
   - Starts with `"mcp:"` → build Resource from CLI config files using `read_mcp_status_from_configs()`
   - Otherwise → look up in `resources` table as before
-- This replaces all call sites: `sm_groups`, `sm_group_enable/disable`, TUI `reload_group_detail`, TUI `enable_group/disable_group`.
+- This replaces **all** `db().get_group_members()` call sites:
+  - `mcp/tools.rs:134` — `sm_list` group filter branch
+  - `mcp/tools.rs:165` — `sm_groups` member count
+  - `mcp/tools.rs:292` — `sm_group_enable/disable` (via `manager.enable_group`)
+  - `tui/app.rs:201` — `reload()` group stats
+  - `tui/app.rs:733` — `reload_group_detail()`
 
 **Adding MCP to group** — `sm_group_add` / TUI `pick_show_mcp`:
 - `find_resource_id(name)` now checks config files for MCPs → returns `"mcp:{name}"`
@@ -147,10 +153,8 @@ When `sm_sources` adds a new source and the background fetch returns zero skills
 
 | File | Change |
 |------|--------|
-| File | Change |
-|------|--------|
 | `core/db.rs` | Remove `resource_targets` table, remove MCP from `resources`, drop FK on `group_members`. Add `schema_version` table for migration. New `get_group_member_ids()` (no JOIN). Remove `set_target_enabled()`, `get_targets_for_resource()`, `enabled_count()`, `enabled_skill_count()`. |
-| `core/manager.rs` | `list_resources(Mcp)` builds Resources from config files. `list_resources(Skill)` checks symlinks for enabled state. `enable/disable_resource` handles `mcp:` prefix without DB lookup. `find_resource_id` checks config files for MCPs. New `get_group_members()` replaces DB JOIN version. `is_first_launch()` checks config files too. `resource_count()` gets MCP total from config files. Remove all `set_target_enabled` calls. |
+| `core/manager.rs` | `list_resources(Mcp)` builds Resources from config files. `list_resources(Skill)` checks symlinks for enabled state. `enable/disable_resource` handles `mcp:` prefix without DB lookup. `find_resource_id` checks config files for MCPs. New `get_group_members()` replaces DB JOIN version. `is_first_launch()` checks config files too. New `resource_count()` — skills from DB, MCPs from `read_mcp_status_from_configs().len()`. Remove all `set_target_enabled` calls. `sm_status` in `tools.rs:182` uses this new `resource_count()`. |
 | `core/scanner.rs` | Remove MCP registration to DB. Remove `set_target_enabled` calls for skills. Simplify to only register new skill metadata to DB. |
 | `core/mcp_discovery.rs` | No change (already reads config files correctly) |
 | `core/resource.rs` | No structural change; `enabled` field still exists, populated by caller |
