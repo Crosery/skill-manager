@@ -296,13 +296,41 @@ impl SkillManager {
         Ok(groups)
     }
 
+    /// Get group members, resolving mcp: IDs from config files dynamically.
+    pub fn get_group_members(&self, group_id: &str) -> Result<Vec<Resource>> {
+        let ids = self.db.get_group_member_ids(group_id)?;
+        let mcp_status = Self::read_mcp_status_from_configs();
+        let mut members = Vec::new();
+
+        for id in &ids {
+            if let Some(mcp_name) = id.strip_prefix("mcp:") {
+                let enabled = mcp_status.get(mcp_name).cloned().unwrap_or_default();
+                members.push(Resource {
+                    id: id.clone(),
+                    name: mcp_name.to_string(),
+                    kind: ResourceKind::Mcp,
+                    description: String::new(),
+                    directory: PathBuf::new(),
+                    source: Source::Local { path: PathBuf::new() },
+                    installed_at: 0,
+                    enabled,
+                });
+            } else if let Ok(Some(mut res)) = self.db.get_resource(id) {
+                res.enabled = self.check_skill_symlinks(&res.name);
+                members.push(res);
+            }
+        }
+
+        Ok(members)
+    }
+
     pub fn enable_group(
         &self,
         group_id: &str,
         target: CliTarget,
         cli_dir_override: Option<&Path>,
     ) -> Result<()> {
-        let members = self.db.get_group_members(group_id)?;
+        let members = self.get_group_members(group_id)?;
         for member in &members {
             self.enable_resource(&member.id, target, cli_dir_override)?;
         }
@@ -315,7 +343,7 @@ impl SkillManager {
         target: CliTarget,
         cli_dir_override: Option<&Path>,
     ) -> Result<()> {
-        let members = self.db.get_group_members(group_id)?;
+        let members = self.get_group_members(group_id)?;
         for member in &members {
             self.disable_resource(&member.id, target, cli_dir_override)?;
         }
@@ -566,6 +594,31 @@ mod tests {
         with_home(tmp.path(), || {
             let result = SkillManager::set_mcp_disabled("anything", CliTarget::Claude, true);
             assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn get_group_members_resolves_mcp_dynamically() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = serde_json::json!({
+            "mcpServers": {
+                "my-mcp": { "command": "mcp-cmd", "args": [] }
+            }
+        });
+        std::fs::write(
+            tmp.path().join(".claude.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        ).unwrap();
+
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(tmp.path().join("sm-data")).unwrap();
+            mgr.db().add_group_member("test-group", "mcp:my-mcp").unwrap();
+
+            let members = mgr.get_group_members("test-group").unwrap();
+            assert_eq!(members.len(), 1);
+            assert_eq!(members[0].name, "my-mcp");
+            assert_eq!(members[0].kind, ResourceKind::Mcp);
+            assert!(members[0].is_enabled_for(CliTarget::Claude));
         });
     }
 
