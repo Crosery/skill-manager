@@ -199,31 +199,54 @@ impl SkillManager {
         kind: Option<ResourceKind>,
         enabled_for: Option<CliTarget>,
     ) -> Result<Vec<Resource>> {
-        let mut resources = self.db.list_resources(kind, enabled_for)?;
-        let mcp_status = Self::read_mcp_status_from_configs();
+        let mut resources = Vec::new();
 
-        for res in &mut resources {
-            if res.kind == ResourceKind::Mcp {
-                if let Some(targets) = mcp_status.get(&res.name) {
-                    res.enabled = targets.clone();
-                } else {
-                    res.enabled = HashMap::new();
+        // Skills: from DB, enabled state from symlinks
+        if kind.is_none() || kind == Some(ResourceKind::Skill) {
+            let mut skills = self.db.list_resources(Some(ResourceKind::Skill), None)?;
+            for skill in &mut skills {
+                skill.enabled = self.check_skill_symlinks(&skill.name);
+            }
+            if let Some(target) = enabled_for {
+                skills.retain(|s| s.is_enabled_for(target));
+            }
+            resources.extend(skills);
+        }
+
+        // MCPs: entirely from config files
+        if kind.is_none() || kind == Some(ResourceKind::Mcp) {
+            let mcp_status = Self::read_mcp_status_from_configs();
+            for (name, targets) in &mcp_status {
+                if let Some(target) = enabled_for {
+                    if !targets.get(&target).copied().unwrap_or(false) {
+                        continue;
+                    }
                 }
+                resources.push(Resource {
+                    id: format!("mcp:{name}"),
+                    name: name.clone(),
+                    kind: ResourceKind::Mcp,
+                    description: String::new(),
+                    directory: PathBuf::new(),
+                    source: Source::Local { path: PathBuf::new() },
+                    installed_at: 0,
+                    enabled: targets.clone(),
+                });
             }
         }
 
-        // If filtering by enabled_for, re-filter MCPs based on config status
-        if let Some(target) = enabled_for {
-            resources.retain(|r| {
-                if r.kind == ResourceKind::Mcp {
-                    r.enabled.get(&target).copied().unwrap_or(false)
-                } else {
-                    true
-                }
-            });
-        }
-
         Ok(resources)
+    }
+
+    /// Check which CLI targets have a symlink for this skill name.
+    fn check_skill_symlinks(&self, name: &str) -> HashMap<CliTarget, bool> {
+        let mut map = HashMap::new();
+        for target in CliTarget::ALL {
+            let link = target.skills_dir().join(name);
+            let enabled = Linker::is_our_symlink(&link, self.paths.data_dir());
+            map.insert(*target, enabled);
+        }
+        map
     }
 
     pub fn uninstall(&self, resource_id: &str) -> Result<()> {
@@ -548,6 +571,38 @@ mod tests {
         with_home(tmp.path(), || {
             let result = SkillManager::set_mcp_disabled("anything", CliTarget::Claude, true);
             assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn list_resources_mcp_reads_from_config_files() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Write a fake .claude.json with MCPs
+        let config = serde_json::json!({
+            "mcpServers": {
+                "server-a": { "command": "a", "args": [] },
+                "server-b": { "command": "b", "args": [], "disabled": true }
+            }
+        });
+        std::fs::write(
+            tmp.path().join(".claude.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        ).unwrap();
+
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(tmp.path().join("sm-data")).unwrap();
+            let mcps = mgr.list_resources(
+                Some(crate::core::resource::ResourceKind::Mcp), None
+            ).unwrap();
+
+            assert_eq!(mcps.len(), 2);
+            let a = mcps.iter().find(|r| r.name == "server-a").unwrap();
+            assert_eq!(a.id, "mcp:server-a");
+            assert!(a.is_enabled_for(CliTarget::Claude));
+
+            let b = mcps.iter().find(|r| r.name == "server-b").unwrap();
+            assert!(!b.is_enabled_for(CliTarget::Claude));
         });
     }
 }
