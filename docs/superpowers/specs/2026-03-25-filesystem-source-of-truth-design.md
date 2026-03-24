@@ -195,32 +195,47 @@ CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 
 On startup, check version. If < 2 (or table missing = version 0/1):
 
+**Principle: preserve all old data for rollback safety. New code simply ignores it.**
+
 ```sql
--- 1. Drop resource_targets
-DROP TABLE IF EXISTS resource_targets;
+-- 1. Auto-backup before migration (via Rust code, not SQL)
+--    call backup::create_backup(paths) before running SQL
 
--- 2. Remove MCP rows from resources
-DELETE FROM resources WHERE kind = 'mcp';
-
--- 3. Recreate group_members without FK constraint
-CREATE TABLE group_members_new (
+-- 2. Recreate group_members without FK constraint (preserves all rows)
+CREATE TABLE IF NOT EXISTS group_members_new (
     group_id TEXT NOT NULL,
     resource_id TEXT NOT NULL,
     PRIMARY KEY (group_id, resource_id)
 );
-INSERT INTO group_members_new SELECT group_id, resource_id FROM group_members;
-DROP TABLE group_members;
+INSERT OR IGNORE INTO group_members_new SELECT group_id, resource_id FROM group_members;
+DROP TABLE IF EXISTS group_members;
 ALTER TABLE group_members_new RENAME TO group_members;
 
--- 4. Update version
+-- 3. Update version
 DELETE FROM schema_version;
 INSERT INTO schema_version VALUES (2);
+
+-- NOTE: resource_targets table is NOT dropped (rollback safety)
+-- NOTE: MCP rows in resources are NOT deleted (rollback safety)
+-- New code simply ignores both — reads filesystem instead
 ```
 
-This runs once on upgrade. The migration is idempotent (safe to re-run).
+What stays untouched after migration:
+- `resource_targets` table — kept, new code ignores it
+- MCP rows in `resources` — kept, new code ignores them
+- `group_members` rows — kept, FK removed so `mcp:` IDs work without JOIN
+- All CLI config files (`.claude.json` etc.) — never modified by migration
+- All symlinks — never modified by migration
+- All group TOML files — never modified by migration
+
+Rollback: user can downgrade to old binary. Old code reads old tables as before.
+
+`is_first_launch()` checks `schema_version >= 2` to avoid re-triggering the first-launch wizard after migration.
+
+Migration log is written to `~/.skill-manager/migration.log` with timestamp and actions taken.
 
 ## Risks
 
-- **Group members referencing deleted MCP rows**: mitigated by keeping `group_members` entries with `mcp:` prefix and resolving them dynamically.
-- **Config file write races**: if user edits config while SM writes → mitigated by read-modify-write with pretty-print (same as current approach). Not atomic, but acceptable for this use case.
+- **Config file write races**: if user edits config while SM writes — mitigated by read-modify-write with pretty-print (same as current approach). Not atomic, but acceptable for this use case.
 - **Performance of filesystem reads**: negligible. Stat ~20 symlinks + parse 4 small JSON files per query.
+- **MCP server process restart**: after binary update, running Claude Code sessions still use the old MCP server process. User needs to restart Claude Code or run `/mcp restart` to pick up changes. Document this in release notes.
