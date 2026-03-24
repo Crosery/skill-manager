@@ -237,7 +237,7 @@ impl SkillManager {
         for target in CliTarget::ALL {
             // Check primary (.agents/skills/) and legacy (skills/) locations
             let primary = target.skills_dir().join(name);
-            let legacy = target.legacy_skills_dir().join(name);
+            let legacy = target.agents_skills_dir().join(name);
             let enabled = primary.exists() || legacy.exists();
             map.insert(*target, enabled);
         }

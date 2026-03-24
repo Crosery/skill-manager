@@ -32,9 +32,9 @@ impl Scanner {
         total.skipped += managed_result.skipped;
         total.errors.extend(managed_result.errors);
 
-        // 2. Scan CLI skill directories (primary .agents/skills/ + legacy skills/)
+        // 2. Scan CLI skill directories (user skills/ + plugin .agents/skills/)
         for target in CliTarget::ALL {
-            for dir in &[target.skills_dir(), target.legacy_skills_dir()] {
+            for dir in &[target.skills_dir(), target.agents_skills_dir()] {
                 if dir.exists() {
                     let result = Self::scan_cli_dir(dir, paths, db, *target)?;
                     total.adopted += result.adopted;

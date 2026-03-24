@@ -697,7 +697,7 @@ impl App {
 
         self.scan_log.push("Scanning skill directories...".into());
         for t in CliTarget::ALL {
-            for dir in &[t.skills_dir(), t.legacy_skills_dir()] {
+            for dir in &[t.skills_dir(), t.agents_skills_dir()] {
                 if dir.exists() {
                     self.scan_log.push(format!("  ✓ {} — {}", t.name(), dir.display()));
                 }
