@@ -320,6 +320,13 @@ impl Database {
         Ok(ids)
     }
 
+    pub fn skill_count(&self) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM resources WHERE kind = 'skill'", [], |r| r.get(0)
+        )?;
+        Ok(count as usize)
+    }
+
     pub fn enabled_skill_count(&self, target: CliTarget) -> Result<usize> {
         let skills: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM resources r JOIN resource_targets rt ON r.id = rt.resource_id

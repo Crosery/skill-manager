@@ -355,12 +355,20 @@ impl SkillManager {
     }
 
     pub fn status(&self, target: CliTarget) -> Result<(usize, usize)> {
-        let skills = self.db.enabled_skill_count(target)?;
+        let mut skill_enabled = 0;
+        if let Ok(skills) = self.db.list_resources(Some(ResourceKind::Skill), None) {
+            for skill in &skills {
+                let link = target.skills_dir().join(&skill.name);
+                if Linker::is_our_symlink(&link, self.paths.data_dir()) {
+                    skill_enabled += 1;
+                }
+            }
+        }
         let mcp_status = Self::read_mcp_status_from_configs();
-        let mcps = mcp_status.values()
+        let mcp_enabled = mcp_status.values()
             .filter(|targets| targets.get(&target).copied().unwrap_or(false))
             .count();
-        Ok((skills, mcps))
+        Ok((skill_enabled, mcp_enabled))
     }
 
     // --- Internal ---
@@ -379,9 +387,16 @@ impl SkillManager {
         String::new()
     }
 
-    /// Returns true if no resources have been registered yet.
     pub fn is_first_launch(&self) -> bool {
-        self.db.resource_count().map(|(s, m)| s + m == 0).unwrap_or(true)
+        let (skills, mcps) = self.resource_count();
+        skills + mcps == 0
+    }
+
+    /// Count total skills (from DB) + total MCPs (from config files).
+    pub fn resource_count(&self) -> (usize, usize) {
+        let skills = self.db.skill_count().unwrap_or(0);
+        let mcps = Self::read_mcp_status_from_configs().len();
+        (skills, mcps)
     }
 
     /// Register discovered MCP servers into the database.
@@ -594,6 +609,23 @@ mod tests {
         with_home(tmp.path(), || {
             let result = SkillManager::set_mcp_disabled("anything", CliTarget::Claude, true);
             assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn is_first_launch_false_when_mcps_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = serde_json::json!({
+            "mcpServers": { "x": { "command": "x" } }
+        });
+        std::fs::write(
+            tmp.path().join(".claude.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        ).unwrap();
+
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(tmp.path().join("sm-data")).unwrap();
+            assert!(!mgr.is_first_launch());
         });
     }
 
