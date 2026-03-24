@@ -403,6 +403,11 @@ impl SkillManager {
                 }
             }
         }
+        // Check MCP config files
+        let mcp_status = Self::read_mcp_status_from_configs();
+        if mcp_status.contains_key(name) {
+            return Some(format!("mcp:{name}"));
+        }
         None
     }
 }
@@ -561,6 +566,26 @@ mod tests {
         with_home(tmp.path(), || {
             let result = SkillManager::set_mcp_disabled("anything", CliTarget::Claude, true);
             assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn find_resource_id_discovers_mcp_from_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = serde_json::json!({
+            "mcpServers": {
+                "my-tool": { "command": "tool", "args": [] }
+            }
+        });
+        std::fs::write(
+            tmp.path().join(".claude.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        ).unwrap();
+
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(tmp.path().join("sm-data")).unwrap();
+            let id = mgr.find_resource_id("my-tool");
+            assert_eq!(id, Some("mcp:my-tool".to_string()));
         });
     }
 
