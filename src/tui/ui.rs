@@ -36,10 +36,8 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(30),
     ]).split(area);
 
-    let version = env!("CARGO_PKG_VERSION");
     let title = Paragraph::new(Line::from(vec![
-        Span::styled(" SM ", Style::default().fg(Color::Rgb(232, 149, 74)).bold()),
-        Span::styled(format!("v{version}"), Style::default().fg(Color::DarkGray)),
+        Span::styled(" Skill Manager", Style::default().fg(Color::Rgb(232, 149, 74)).bold()),
     ])).block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(Color::Rgb(40, 40, 50))));
     f.render_widget(title, chunks[0]);
 
@@ -235,15 +233,27 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         _ => (String::new(), String::new()),
     };
 
+    let footer_chunks = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(16),
+    ]).split(area);
+
     let mut spans = vec![
         Span::styled(left, Style::default().fg(Color::Rgb(56, 164, 252))),
         Span::raw("  "),
     ];
     spans.extend(styled_help(&right).spans);
 
-    let footer = Paragraph::new(Line::from(spans))
+    let help_bar = Paragraph::new(Line::from(spans))
         .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::Rgb(40, 40, 50))));
-    f.render_widget(footer, area);
+    f.render_widget(help_bar, footer_chunks[0]);
+
+    let version = env!("CARGO_PKG_VERSION");
+    let ver_widget = Paragraph::new(Line::from(vec![
+        Span::styled(format!("v{version} "), Style::default().fg(Color::Rgb(80, 80, 100)).italic()),
+    ])).alignment(Alignment::Right)
+       .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::Rgb(40, 40, 50))));
+    f.render_widget(ver_widget, footer_chunks[1]);
 }
 
 fn render_create_dialog(f: &mut Frame, app: &App, step: u8) {
