@@ -68,9 +68,27 @@ impl Scanner {
         Ok(total)
     }
 
-    /// Fast recursive discovery: find all SKILL.md files under a root directory.
-    /// Skips common irrelevant dirs (.git, node_modules, target, .cache, etc.)
+    /// Fast discovery using fd (multi-threaded, respects .gitignore).
+    /// Falls back to simple recursive scan if fd is not installed.
     pub fn discover_skills(root: &Path) -> Vec<std::path::PathBuf> {
+        // Try fd first (fast, multi-threaded)
+        if let Ok(output) = std::process::Command::new("fd")
+            .args(["SKILL.md", "--type", "f", "--no-ignore"])
+            .arg(root)
+            .output()
+        {
+            if output.status.success() {
+                return String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(|l| {
+                        let p = std::path::PathBuf::from(l);
+                        p.parent().map(|parent| parent.to_path_buf())
+                    })
+                    .collect();
+            }
+        }
+
+        // Fallback: simple recursive walk
         let skip = [".git", "node_modules", "target", ".cache", ".local", ".cargo",
                      ".rustup", ".npm", ".pnpm", "venv", "__pycache__", ".venv",
                      "dist", "build", ".next", ".nuxt"];
@@ -80,7 +98,7 @@ impl Scanner {
     }
 
     fn walk_for_skills(dir: &Path, skip: &[&str], results: &mut Vec<std::path::PathBuf>, depth: usize) {
-        if depth > 10 { return; } // prevent infinite recursion
+        if depth > 8 { return; }
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return,
