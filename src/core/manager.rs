@@ -456,6 +456,120 @@ impl SkillManager {
         Ok((skill_enabled, mcp_enabled))
     }
 
+    // --- Install from GitHub ---
+
+    /// Install skills from a GitHub repo, register in DB, create group, enable for target.
+    /// Returns (group_id, skill_names).
+    pub fn install_github_repo(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        target: CliTarget,
+    ) -> Result<(String, Vec<String>)> {
+        use crate::core::installer::Installer;
+
+        // Download and extract skills
+        let rt = tokio::runtime::Runtime::new()?;
+        let results = rt.block_on(Installer::install_from_github(owner, repo, branch, self.paths()))?;
+
+        if results.is_empty() {
+            bail!("No skills found in {owner}/{repo}. This might be a Claude plugin — try: /plugin install {repo}");
+        }
+
+        let mut skill_names = Vec::new();
+
+        // Register each skill in DB
+        for r in &results {
+            let dir = self.paths.skills_dir().join(&r.name);
+            let description = Self::extract_description(&dir);
+            let resource = Resource {
+                id: r.resource_id.clone(),
+                name: r.name.clone(),
+                kind: ResourceKind::Skill,
+                description,
+                directory: dir.clone(),
+                source: Source::GitHub {
+                    owner: owner.to_string(),
+                    repo: repo.to_string(),
+                    branch: branch.to_string(),
+                },
+                installed_at: chrono::Utc::now().timestamp(),
+                enabled: HashMap::new(),
+            };
+            let _ = self.db.insert_resource(&resource);
+
+            // Enable for target (create symlink)
+            let _ = self.enable_resource(&r.resource_id, target, None);
+            skill_names.push(r.name.clone());
+        }
+
+        // Auto-create group
+        let group_id = repo.to_lowercase();
+        let group = crate::core::group::Group {
+            name: repo.to_string(),
+            description: format!("Skills from {owner}/{repo}"),
+            kind: crate::core::group::GroupKind::Custom,
+            auto_enable: false,
+            members: vec![],
+        };
+        let _ = self.create_group(&group_id, &group);
+
+        // Add all skills to the group
+        for r in &results {
+            let _ = self.db.add_group_member(&group_id, &r.resource_id);
+        }
+
+        Ok((group_id, skill_names))
+    }
+
+    /// Register already-downloaded skills (in managed dir) and create group.
+    /// Used by install_github_repo after download, and testable without network.
+    pub fn register_and_group_skills(
+        &self,
+        skill_names: &[String],
+        group_id: &str,
+        group_name: &str,
+        target: CliTarget,
+    ) -> Result<usize> {
+        let mut registered = 0;
+
+        // Create group
+        let group = crate::core::group::Group {
+            name: group_name.to_string(),
+            description: format!("Skills group: {group_name}"),
+            kind: crate::core::group::GroupKind::Custom,
+            auto_enable: false,
+            members: vec![],
+        };
+        let _ = self.create_group(group_id, &group);
+
+        for name in skill_names {
+            let dir = self.paths.skills_dir().join(name);
+            if !dir.exists() { continue; }
+
+            let description = Self::extract_description(&dir);
+            let resource_id = format!("local:{name}");
+            let resource = Resource {
+                id: resource_id.clone(),
+                name: name.clone(),
+                kind: ResourceKind::Skill,
+                description,
+                directory: dir,
+                source: Source::Local { path: self.paths.skills_dir().join(name) },
+                installed_at: chrono::Utc::now().timestamp(),
+                enabled: HashMap::new(),
+            };
+            if self.db.insert_resource(&resource).is_ok() {
+                let _ = self.enable_resource(&resource_id, target, None);
+                let _ = self.db.add_group_member(group_id, &resource_id);
+                registered += 1;
+            }
+        }
+
+        Ok(registered)
+    }
+
     // --- Internal ---
 
     fn extract_description(skill_dir: &Path) -> String {
@@ -798,6 +912,51 @@ mod tests {
             // Both entries exist = both enabled
             let b = mcps.iter().find(|r| r.name == "server-b").unwrap();
             assert!(b.is_enabled_for(CliTarget::Claude));
+        });
+    }
+
+    #[test]
+    fn register_and_group_skills_creates_group_and_enables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sm_data = tmp.path().join("sm-data");
+
+        // Create fake managed skill dirs with realistic SKILL.md
+        let skills_dir = sm_data.join("skills");
+        std::fs::create_dir_all(skills_dir.join("debugging")).unwrap();
+        std::fs::write(skills_dir.join("debugging/SKILL.md"),
+            "---\nname: debugging\ndescription: \"Systematic debugging skill\"\n---\n\n# Debugging\n").unwrap();
+        std::fs::create_dir_all(skills_dir.join("tdd")).unwrap();
+        std::fs::write(skills_dir.join("tdd/SKILL.md"),
+            "---\nname: tdd\ndescription: \"Test-driven development\"\n---\n\n# TDD\n").unwrap();
+
+        // Also create the skills_dir for symlinking
+        let claude_skills = tmp.path().join(".claude/skills");
+        std::fs::create_dir_all(&claude_skills).unwrap();
+
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(sm_data.clone()).unwrap();
+
+            let count = mgr.register_and_group_skills(
+                &["debugging".into(), "tdd".into()],
+                "my-toolkit",
+                "My Toolkit",
+                CliTarget::Claude,
+            ).unwrap();
+
+            assert_eq!(count, 2, "should register 2 skills");
+
+            // Group created with members
+            let members = mgr.get_group_members("my-toolkit").unwrap();
+            assert_eq!(members.len(), 2);
+
+            // Skills enabled (symlinks created)
+            assert!(claude_skills.join("debugging").exists(), "debugging symlink should exist");
+            assert!(claude_skills.join("tdd").exists(), "tdd symlink should exist");
+
+            // Descriptions parsed from frontmatter
+            let resources = mgr.list_resources(Some(ResourceKind::Skill), None).unwrap();
+            let dbg = resources.iter().find(|r| r.name == "debugging").unwrap();
+            assert_eq!(dbg.description, "Systematic debugging skill");
         });
     }
 }

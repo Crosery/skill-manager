@@ -91,6 +91,22 @@ pub struct MarketInstallParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+pub struct InstallGitHubParams {
+    /// GitHub repo in "owner/repo" or "owner/repo@branch" format, or full URL
+    pub repo: String,
+    /// CLI target to enable for: claude, codex, gemini, opencode (default: claude)
+    pub target: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+pub struct BatchGroupAddParams {
+    /// Group ID
+    pub group: String,
+    /// List of resource names to add
+    pub names: Vec<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 pub struct BatchParams {
     /// List of resource names to enable/disable
     pub names: Vec<String>,
@@ -238,8 +254,13 @@ impl SmServer {
     fn sm_scan(&self) -> Json<TextResult> {
         let mgr = self.manager.lock().unwrap();
         let result = match mgr.scan() {
-            Ok(r) => format!("Scan: {} adopted, {} skipped, {} errors",
-                r.adopted, r.skipped, r.errors.len()),
+            Ok(r) => {
+                let mut msg = format!("Scan: {} adopted, {} skipped", r.adopted, r.skipped);
+                if !r.errors.is_empty() {
+                    msg.push_str(&format!("\nErrors:\n  {}", r.errors.join("\n  ")));
+                }
+                msg
+            }
             Err(e) => format!("Error: {e}"),
         };
         Json(TextResult { result })
@@ -568,6 +589,61 @@ impl SmServer {
         Json(TextResult { result: results.join("\n") })
     }
 
+    #[tool(description = "Install skills from a GitHub repo (owner/repo or URL). Downloads, registers, creates group, and enables for target CLI. Example: sm_install(repo='obra/superpowers')")]
+    fn sm_install(&self, Parameters(p): Parameters<InstallGitHubParams>) -> Json<TextResult> {
+        let target = parse_target(p.target.as_deref());
+        let mgr = self.manager.lock().unwrap();
+
+        let input = p.repo.trim()
+            .trim_start_matches("https://github.com/")
+            .trim_end_matches('/');
+        let (repo_part, branch) = if input.contains('@') {
+            let parts: Vec<&str> = input.splitn(2, '@').collect();
+            (parts[0], parts[1].to_string())
+        } else {
+            (input, "main".to_string())
+        };
+        let parts: Vec<&str> = repo_part.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            return Json(TextResult { result: format!("Invalid repo format: '{}'. Use 'owner/repo' or 'owner/repo@branch'.", p.repo) });
+        }
+        let (owner, repo) = (parts[0], parts[1]);
+
+        let result = match mgr.install_github_repo(owner, repo, &branch, target) {
+            Ok((group_id, names)) => {
+                format!(
+                    "Installed {} skills from {}/{}:\n  {}\n\nGroup '{}' created. Use sm_group_enable/sm_group_disable to toggle all at once.",
+                    names.len(), owner, repo,
+                    names.join(", "),
+                    group_id,
+                )
+            }
+            Err(e) => format!("Install failed: {e}"),
+        };
+        Json(TextResult { result })
+    }
+
+    #[tool(description = "Add multiple skills/MCPs to a group at once")]
+    fn sm_batch_group_add(&self, Parameters(p): Parameters<BatchGroupAddParams>) -> Json<TextResult> {
+        let mgr = self.manager.lock().unwrap();
+        let mut added = 0;
+        let mut errors = Vec::new();
+        for name in &p.names {
+            match mgr.find_resource_id(name) {
+                Some(rid) => match mgr.db().add_group_member(&p.group, &rid) {
+                    Ok(_) => added += 1,
+                    Err(e) => errors.push(format!("{name}: {e}")),
+                },
+                None => errors.push(format!("{name}: not found")),
+            }
+        }
+        let mut result = format!("Added {added}/{} to group '{}'", p.names.len(), p.group);
+        if !errors.is_empty() {
+            result.push_str(&format!("\nErrors: {}", errors.join(", ")));
+        }
+        Json(TextResult { result })
+    }
+
     #[tool(description = "Create a backup of all CLI skill directories and config files")]
     fn sm_backup(&self) -> Json<TextResult> {
         let mgr = self.manager.lock().unwrap();
@@ -627,10 +703,12 @@ impl ServerHandler for SmServer {
         let mut info = ServerInfo::default();
         info.instructions = Some(
             "Skill Manager — manage AI CLI skills, MCPs, groups, and market. \
+             To install skills from GitHub: sm_install(repo='owner/repo'). \
              Tools: sm_list, sm_groups, sm_status, sm_enable, sm_disable, sm_scan, \
              sm_delete, sm_create_group, sm_delete_group, sm_group_add, sm_group_remove, \
-             sm_batch_enable, sm_batch_disable, sm_backup, sm_restore, sm_backups, \
-             sm_market, sm_market_install, sm_sources, sm_register".into()
+             sm_batch_enable, sm_batch_disable, sm_batch_group_add, \
+             sm_install, sm_market, sm_market_install, sm_sources, \
+             sm_backup, sm_restore, sm_backups, sm_register".into()
         );
         info.capabilities = rmcp::model::ServerCapabilities::builder()
             .enable_tools()
@@ -645,14 +723,14 @@ mod tests {
     use rmcp::handler::server::wrapper::Parameters;
 
     #[test]
-    fn tool_router_has_22_tools() {
+    fn tool_router_has_24_tools() {
         let server = SmServer::new().unwrap();
         let tools = server.tool_router.list_all();
         eprintln!("Registered tools: {}", tools.len());
         for t in &tools {
             eprintln!("  - {}", t.name);
         }
-        assert_eq!(tools.len(), 22, "Expected 22 tools in tool_router, got {}", tools.len());
+        assert_eq!(tools.len(), 24, "Expected 24 tools in tool_router, got {}", tools.len());
     }
 
     #[test]
