@@ -54,6 +54,17 @@ impl Scanner {
             }
         }
 
+        // 4. Scan ~/skills/ directory (e.g. SkillHub installs) — register only
+        if let Some(home) = dirs::home_dir() {
+            let home_skills = home.join("skills");
+            if home_skills.exists() {
+                let result = Self::scan_agents_dir(&home_skills, db);
+                total.adopted += result.adopted;
+                total.skipped += result.skipped;
+                total.errors.extend(result.errors);
+            }
+        }
+
         Ok(total)
     }
 
