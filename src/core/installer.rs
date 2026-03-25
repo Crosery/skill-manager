@@ -109,14 +109,6 @@ impl Installer {
     }
 
     fn extract_description(dir: &Path) -> String {
-        let md = dir.join("SKILL.md");
-        if let Ok(content) = std::fs::read_to_string(&md) {
-            for line in content.lines() {
-                let t = line.trim();
-                if t.is_empty() || t.starts_with('#') { continue; }
-                return t.chars().take(200).collect();
-            }
-        }
-        String::new()
+        crate::core::scanner::Scanner::extract_description(dir)
     }
 }

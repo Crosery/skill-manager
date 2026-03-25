@@ -459,17 +459,7 @@ impl SkillManager {
     // --- Internal ---
 
     fn extract_description(skill_dir: &Path) -> String {
-        let skill_md = skill_dir.join("SKILL.md");
-        if let Ok(content) = std::fs::read_to_string(&skill_md) {
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() || trimmed.starts_with('#') {
-                    continue;
-                }
-                return trimmed.chars().take(200).collect();
-            }
-        }
-        String::new()
+        Scanner::extract_description(skill_dir)
     }
 
     pub fn is_first_launch(&self) -> bool {

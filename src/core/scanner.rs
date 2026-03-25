@@ -32,15 +32,25 @@ impl Scanner {
         total.skipped += managed_result.skipped;
         total.errors.extend(managed_result.errors);
 
-        // 2. Scan CLI skill directories (user skills/ + plugin .agents/skills/)
+        // 2. Scan user skills/ directories — adopt (move) foreign entries
         for target in CliTarget::ALL {
-            for dir in &[target.skills_dir(), target.agents_skills_dir()] {
-                if dir.exists() {
-                    let result = Self::scan_cli_dir(dir, paths, db, *target)?;
-                    total.adopted += result.adopted;
-                    total.skipped += result.skipped;
-                    total.errors.extend(result.errors);
-                }
+            let cli_dir = target.skills_dir();
+            if cli_dir.exists() {
+                let result = Self::scan_cli_dir(&cli_dir, paths, db, *target)?;
+                total.adopted += result.adopted;
+                total.skipped += result.skipped;
+                total.errors.extend(result.errors);
+            }
+        }
+
+        // 3. Scan plugin .agents/skills/ directories — register only, never move files
+        for target in CliTarget::ALL {
+            let agents_dir = target.agents_skills_dir();
+            if agents_dir.exists() {
+                let result = Self::scan_agents_dir(&agents_dir, db);
+                total.adopted += result.adopted;
+                total.skipped += result.skipped;
+                total.errors.extend(result.errors);
             }
         }
 
@@ -215,18 +225,149 @@ impl Scanner {
         Ok(())
     }
 
-    fn extract_description(skill_dir: &Path) -> String {
+    /// Scan .agents/skills/ — read-only, register in DB but never move files.
+    fn scan_agents_dir(dir: &Path, db: &Database) -> ScanResult {
+        let mut result = ScanResult::default();
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return result,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() { continue; }
+            let name = match entry.file_name().to_str() {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if !path.join("SKILL.md").exists() { continue; }
+
+            // Skip if already known
+            let already_exists = db.list_resources(None, None)
+                .map(|all| all.iter().any(|r| r.name == name))
+                .unwrap_or(false);
+            if already_exists {
+                result.skipped += 1;
+                continue;
+            }
+
+            let description = Self::extract_description(&path);
+            let resource = Resource {
+                id: format!("local:{name}"),
+                name,
+                kind: ResourceKind::Skill,
+                description,
+                directory: path.clone(),
+                source: Source::Local { path: path.clone() },
+                installed_at: chrono::Utc::now().timestamp(),
+                enabled: HashMap::new(),
+            };
+            match db.insert_resource(&resource) {
+                Ok(_) => result.adopted += 1,
+                Err(e) => result.errors.push(format!("{}: {e}", entry.file_name().to_string_lossy())),
+            }
+        }
+        result
+    }
+
+    pub fn extract_description(skill_dir: &Path) -> String {
         let skill_md = skill_dir.join("SKILL.md");
-        if let Ok(content) = std::fs::read_to_string(&skill_md) {
-            for line in content.lines() {
+        let content = match std::fs::read_to_string(&skill_md) {
+            Ok(c) => c,
+            Err(_) => return String::new(),
+        };
+
+        let mut lines = content.lines();
+        let first = lines.next().unwrap_or("");
+
+        // If starts with frontmatter, parse it
+        if first.trim() == "---" {
+            let mut in_frontmatter = true;
+            let mut fm_description = String::new();
+
+            for line in &mut lines {
+                let trimmed = line.trim();
+                if trimmed == "---" {
+                    in_frontmatter = false;
+                    break;
+                }
+                // Parse description field from frontmatter
+                if let Some(rest) = trimmed.strip_prefix("description:") {
+                    fm_description = rest.trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_string();
+                }
+            }
+
+            if !fm_description.is_empty() {
+                return fm_description.chars().take(200).collect();
+            }
+
+            if in_frontmatter {
+                return String::new(); // malformed frontmatter
+            }
+
+            // No description in frontmatter — fall through to body text
+            for line in lines {
                 let trimmed = line.trim();
                 if trimmed.is_empty() || trimmed.starts_with('#') {
                     continue;
                 }
                 return trimmed.chars().take(200).collect();
             }
+            String::new()
+        } else {
+            // No frontmatter — original logic (first is already consumed)
+            let trimmed = first.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                return trimmed.chars().take(200).collect();
+            }
+            for line in lines {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                return trimmed.chars().take(200).collect();
+            }
+            String::new()
         }
-        String::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_description_skips_frontmatter_reads_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: brainstorming\ndescription: \"Explores user intent and design before implementation.\"\n---\n\n# Brainstorming\n\nHelp turn ideas into designs.\n").unwrap();
+
+        let desc = Scanner::extract_description(&skill_dir);
+        assert_eq!(desc, "Explores user intent and design before implementation.");
     }
 
+    #[test]
+    fn extract_description_no_frontmatter_reads_first_text_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("simple-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "# My Skill\n\nThis skill does something useful.\n\nMore details here.\n").unwrap();
+
+        let desc = Scanner::extract_description(&skill_dir);
+        assert_eq!(desc, "This skill does something useful.");
+    }
+
+    #[test]
+    fn extract_description_frontmatter_without_description_reads_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("no-desc");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: no-desc\n---\n\n# No Description Skill\n\nBut this line explains it.\n").unwrap();
+
+        let desc = Scanner::extract_description(&skill_dir);
+        assert_eq!(desc, "But this line explains it.");
+    }
 }
