@@ -36,8 +36,10 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(30),
     ]).split(area);
 
+    let version = env!("CARGO_PKG_VERSION");
     let title = Paragraph::new(Line::from(vec![
-        Span::styled(" Skill Manager", Style::default().fg(Color::Rgb(232, 149, 74)).bold()),
+        Span::styled(" SM ", Style::default().fg(Color::Rgb(232, 149, 74)).bold()),
+        Span::styled(format!("v{version}"), Style::default().fg(Color::DarkGray)),
     ])).block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(Color::Rgb(40, 40, 50))));
     f.render_widget(title, chunks[0]);
 
