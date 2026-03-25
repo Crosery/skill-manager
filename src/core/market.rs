@@ -347,24 +347,28 @@ impl Market {
         for task in tasks {
             let client = client.clone();
             set.spawn(async move {
-                let resp = client.get(&task.url).send().await
-                    .ok()
-                    .filter(|r| r.status().is_success());
-                let bytes = match resp {
-                    Some(r) => r.bytes().await.ok(),
-                    None => None,
-                };
-                (task.skill_name, task.dest_path, bytes)
+                let result = client.get(&task.url).send().await;
+                match result {
+                    Ok(resp) if resp.status().is_success() => {
+                        match resp.bytes().await {
+                            Ok(bytes) => (task.skill_name, task.dest_path, Some(bytes)),
+                            Err(_) => (task.skill_name, task.dest_path, None),
+                        }
+                    }
+                    _ => (task.skill_name, task.dest_path, None),
+                }
             });
         }
 
         let mut downloaded = std::collections::HashSet::new();
-        while let Some(Ok((skill_name, dest_path, Some(content)))) = set.join_next().await {
-            if let Some(parent) = dest_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if std::fs::write(&dest_path, &content).is_ok() {
-                downloaded.insert(skill_name);
+        while let Some(join_result) = set.join_next().await {
+            if let Ok((skill_name, dest_path, Some(content))) = join_result {
+                if let Some(parent) = dest_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::write(&dest_path, &content).is_ok() {
+                    downloaded.insert(skill_name);
+                }
             }
         }
         downloaded
