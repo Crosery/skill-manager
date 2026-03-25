@@ -28,6 +28,7 @@ pub fn render(f: &mut Frame, app: &App) {
         InputMode::GroupDetail => render_group_detail(f, app, &t),
         InputMode::PickSkillForGroup => render_pick_skill(f, app, &t),
         InputMode::Help => render_help(f, &t),
+        InputMode::RenameGroup => render_rename_dialog(f, app, &t),
         _ => {}
     }
 }
@@ -651,6 +652,33 @@ fn render_first_launch(f: &mut Frame, app: &App, t: &Theme, step: u8) {
 }
 
 /// Turn "key1 desc1  key2 desc2" into styled spans: keys bold+colored, descs dim.
+fn render_rename_dialog(f: &mut Frame, app: &App, t: &Theme) {
+    let area = centered_rect(50, 25, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(Span::styled(" Rename Group ", Style::default().fg(t.brand).bold()))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(t.text_highlight));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled("  New name:", Style::default().fg(t.item_desc))),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  > "),
+            Span::styled(&app.input_buf, Style::default().fg(t.text).bold()),
+            Span::styled("█", Style::default().fg(t.text_highlight)),
+        ]),
+        Line::from(""),
+        styled_help("  ESC cancel  ENTER confirm", t),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn render_help(f: &mut Frame, t: &Theme) {
     let area = centered_rect(55, 70, f.area());
     f.render_widget(Clear, area);
@@ -681,6 +709,7 @@ fn render_help(f: &mut Frame, t: &Theme) {
         Line::from(""),
         Line::from(Span::styled("  Groups", ss)),
         Line::from(vec![Span::styled(" c       ", ks), Span::styled("Create new group", ds)]),
+        Line::from(vec![Span::styled(" r       ", ks), Span::styled("Rename group (Groups tab)", ds)]),
         Line::from(vec![Span::styled(" a       ", ks), Span::styled("Add selected to a group", ds)]),
         Line::from(""),
         Line::from(Span::styled("  Market", ss)),

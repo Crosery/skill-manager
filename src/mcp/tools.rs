@@ -51,6 +51,14 @@ pub struct NameParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+pub struct RenameGroupParams {
+    /// Group ID
+    pub id: String,
+    /// New display name
+    pub name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 pub struct StatusParams {
     /// CLI target: claude, codex, gemini, opencode
     pub target: Option<String>,
@@ -309,6 +317,16 @@ impl SmServer {
         } else {
             Json(TextResult { result: format!("Group not found: {}", p.name) })
         }
+    }
+
+    #[tool(description = "Rename a group's display name")]
+    fn sm_rename_group(&self, Parameters(p): Parameters<RenameGroupParams>) -> Json<TextResult> {
+        let mgr = self.manager.lock().unwrap();
+        let result = match mgr.rename_group(&p.id, &p.name) {
+            Ok(_) => format!("Group '{}' renamed to '{}'", p.id, p.name),
+            Err(e) => format!("Error: {e}"),
+        };
+        Json(TextResult { result })
     }
 
     #[tool(description = "Add a skill or MCP to a group")]
@@ -709,14 +727,14 @@ mod tests {
     use rmcp::handler::server::wrapper::Parameters;
 
     #[test]
-    fn tool_router_has_24_tools() {
+    fn tool_router_has_25_tools() {
         let server = SmServer::new().unwrap();
         let tools = server.tool_router.list_all();
         eprintln!("Registered tools: {}", tools.len());
         for t in &tools {
             eprintln!("  - {}", t.name);
         }
-        assert_eq!(tools.len(), 24, "Expected 24 tools in tool_router, got {}", tools.len());
+        assert_eq!(tools.len(), 25, "Expected 25 tools in tool_router, got {}", tools.len());
     }
 
     #[test]

@@ -45,6 +45,8 @@ pub enum InputMode {
     PickSkillForGroup,
     /// Help overlay
     Help,
+    /// Rename group
+    RenameGroup,
 }
 
 pub struct App {
@@ -333,6 +335,7 @@ impl App {
             InputMode::GroupDetail => self.handle_group_detail_key(key),
             InputMode::PickSkillForGroup => self.handle_pick_skill_key(key),
             InputMode::Help => { self.mode = InputMode::Normal; }
+            InputMode::RenameGroup => self.handle_rename_group_key(key),
             InputMode::Normal => self.handle_normal_key(key),
         }
     }
@@ -459,6 +462,15 @@ impl App {
             KeyCode::Char('i') => {
                 self.mode = InputMode::Install;
                 self.input_buf.clear();
+            }
+
+            // Rename group
+            KeyCode::Char('r') if self.tab == Tab::Groups => {
+                let visible = self.visible_groups();
+                if let Some((_, name, _, _)) = visible.get(self.selected) {
+                    self.input_buf = name.clone();
+                    self.mode = InputMode::RenameGroup;
+                }
             }
 
             // Delete group
@@ -635,6 +647,36 @@ impl App {
             }
             self.message = Some(format!("Group '{name}' deleted"));
             self.reload();
+        }
+    }
+
+    fn handle_rename_group_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = InputMode::Normal;
+                self.input_buf.clear();
+            }
+            KeyCode::Enter => {
+                let new_name = self.input_buf.trim().to_string();
+                if new_name.is_empty() {
+                    self.mode = InputMode::Normal;
+                    return;
+                }
+                let visible = self.visible_groups();
+                if let Some((id, _, _, _)) = visible.get(self.selected) {
+                    let id = id.clone();
+                    match self.mgr.rename_group(&id, &new_name) {
+                        Ok(_) => self.message = Some(format!("Renamed to '{new_name}'")),
+                        Err(e) => self.message = Some(format!("Error: {e}")),
+                    }
+                }
+                self.input_buf.clear();
+                self.mode = InputMode::Normal;
+                self.reload();
+            }
+            KeyCode::Backspace => { self.input_buf.pop(); }
+            KeyCode::Char(c) => self.input_buf.push(c),
+            _ => {}
         }
     }
 

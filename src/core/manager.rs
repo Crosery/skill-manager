@@ -433,6 +433,17 @@ impl SkillManager {
         Ok(())
     }
 
+    pub fn rename_group(&self, group_id: &str, new_name: &str) -> Result<()> {
+        let path = self.paths.groups_dir().join(format!("{group_id}.toml"));
+        if !path.exists() {
+            bail!("Group not found: {group_id}");
+        }
+        let mut group = Group::load_from_file(&path)?;
+        group.name = new_name.to_string();
+        group.save_to_file(&path)?;
+        Ok(())
+    }
+
     pub fn get_suggested_groups(&self, name: &str, description: &str) -> Vec<String> {
         Classifier::suggest_groups(name, description)
     }
@@ -970,6 +981,46 @@ mod tests {
             let resources = mgr.list_resources(Some(ResourceKind::Skill), None).unwrap();
             let dbg = resources.iter().find(|r| r.name == "debugging").unwrap();
             assert_eq!(dbg.description, "Systematic debugging skill");
+        });
+    }
+
+    #[test]
+    fn rename_group_updates_display_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sm_data = tmp.path().join("sm-data");
+
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(sm_data.clone()).unwrap();
+
+            // Create a group
+            let group = crate::core::group::Group {
+                name: "Old Name".into(),
+                description: "test group".into(),
+                kind: crate::core::group::GroupKind::Custom,
+                auto_enable: false,
+                members: vec![],
+            };
+            mgr.create_group("my-group", &group).unwrap();
+
+            // Rename it
+            mgr.rename_group("my-group", "New Name").unwrap();
+
+            // Verify name changed
+            let groups = mgr.list_groups().unwrap();
+            let (_, g) = groups.iter().find(|(id, _)| id == "my-group").unwrap();
+            assert_eq!(g.name, "New Name");
+            // Description unchanged
+            assert_eq!(g.description, "test group");
+        });
+    }
+
+    #[test]
+    fn rename_nonexistent_group_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(tmp.path().join("sm-data")).unwrap();
+            let result = mgr.rename_group("nonexistent", "New Name");
+            assert!(result.is_err());
         });
     }
 }
