@@ -698,13 +698,23 @@ impl ServerHandler for SmServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.instructions = Some(
-            "Skill Manager — manage AI CLI skills, MCPs, groups, and market. \
-             To install skills from GitHub: sm_install(repo='owner/repo'). \
-             Tools: sm_list, sm_groups, sm_status, sm_enable, sm_disable, sm_scan, \
-             sm_delete, sm_create_group, sm_delete_group, sm_group_add, sm_group_remove, \
-             sm_batch_enable, sm_batch_disable, sm_batch_group_add, \
-             sm_install, sm_market, sm_market_install, sm_sources, \
-             sm_backup, sm_restore, sm_backups, sm_register".into()
+            "Skill Manager — manage AI CLI skills, MCPs, groups, and market.\n\
+             \n\
+             INSTALL WORKFLOW (follow in order, do NOT ask user between steps):\n\
+             1. sm_market(search='keyword') — check market first\n\
+             2. If found → sm_market_install(name='...') → done\n\
+             3. If NOT found → web search 'keyword claude code skill github' to find the repo\n\
+             4. Found repo → sm_install(repo='owner/repo') — downloads, registers, groups, enables automatically\n\
+             5. If repo is a plugin format → tell user: /plugin install <name>@<marketplace>\n\
+             Never ask user to search manually. Always try to find and install autonomously.\n\
+             \n\
+             KEY TOOLS:\n\
+             - sm_install(repo) — one-step install from GitHub (fast, concurrent downloads)\n\
+             - sm_market(search) / sm_market_install(name) — install from market cache\n\
+             - sm_enable/sm_disable — toggle skill or MCP for a CLI target\n\
+             - sm_list / sm_status — view resources and counts\n\
+             - sm_groups / sm_create_group / sm_batch_group_add — organize into groups\n\
+             - sm_scan — discover new skills from filesystem".into()
         );
         info.capabilities = rmcp::model::ServerCapabilities::builder()
             .enable_tools()
