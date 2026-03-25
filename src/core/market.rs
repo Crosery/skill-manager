@@ -200,16 +200,17 @@ fn cache_key(source: &SourceEntry) -> String {
     format!("{}_{}", source.owner, source.repo)
 }
 
-pub struct ExtractResult {
+pub(crate) struct ExtractResult {
     pub skills: Vec<MarketSkill>,
     pub plugin_detected: bool,
+    pub tree: GitTree,
 }
 
 pub struct Market;
 
 impl Market {
     /// Extract skills from a git tree. Also detects .claude-plugin format.
-    pub(crate) fn extract_skills(tree: &GitTree, source: &SourceEntry) -> ExtractResult {
+    pub(crate) fn extract_skills(tree: GitTree, source: &SourceEntry) -> ExtractResult {
         let label = &source.label;
         let repo_id = source.repo_id();
         let mut skills = Vec::new();
@@ -261,11 +262,11 @@ impl Market {
 
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         skills.dedup_by(|a, b| a.name == b.name);
-        ExtractResult { skills, plugin_detected }
+        ExtractResult { skills, plugin_detected, tree }
     }
 
     /// Fetch skill list from GitHub API.
-    pub async fn fetch(source: &SourceEntry) -> Result<ExtractResult> {
+    pub(crate) async fn fetch(source: &SourceEntry) -> Result<ExtractResult> {
         let url = format!(
             "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
             source.owner, source.repo, source.branch,
@@ -281,37 +282,75 @@ impl Market {
         }
 
         let body: GitTree = resp.json().await?;
-        Ok(Self::extract_skills(&body, source))
+        Ok(Self::extract_skills(body, source))
     }
 
-    /// Install a single skill: download the entire skill directory from GitHub.
-    /// Uses GitHub Contents API to list all files, then downloads each via raw URL.
-    pub async fn install_single(skill: &MarketSkill, paths: &crate::core::paths::AppPaths) -> Result<()> {
+    /// Get all file paths belonging to a skill from the git tree.
+    pub(crate) fn get_skill_files(tree: &GitTree, repo_path: &str) -> Vec<String> {
+        let prefix = format!("{repo_path}/");
+        tree.tree.iter()
+            .filter(|n| n.path.starts_with(&prefix))
+            .map(|n| n.path.clone())
+            .collect()
+    }
+
+    /// Install a single skill using git tree (fast: raw downloads, no Contents API).
+    /// If tree is provided, uses it to find files; otherwise falls back to Contents API.
+    pub(crate) async fn install_single_with_tree(
+        skill: &MarketSkill,
+        paths: &crate::core::paths::AppPaths,
+        tree: Option<&GitTree>,
+    ) -> Result<()> {
         let parts: Vec<&str> = skill.source_repo.splitn(2, '/').collect();
         if parts.len() != 2 {
             bail!("invalid source_repo: {}", skill.source_repo);
         }
         let (owner, repo) = (parts[0], parts[1]);
-
         let client = reqwest::Client::builder()
             .user_agent("skill-manager/0.1")
             .build()?;
-
         let skill_dir = paths.skills_dir().join(&skill.name);
         std::fs::create_dir_all(&skill_dir)?;
 
-        // Use the repo_path as the directory to list; if empty, use root
-        let api_path = if skill.repo_path.is_empty() {
-            String::new()
+        let repo_path = if skill.repo_path.is_empty() {
+            &skill.name
         } else {
-            skill.repo_path.clone()
+            &skill.repo_path
         };
 
-        Self::download_directory_recursive(
-            &client, owner, repo, &skill.branch, &api_path, &skill_dir,
-        ).await?;
+        if let Some(tree) = tree {
+            // Fast path: download files directly from raw.githubusercontent.com
+            let files = Self::get_skill_files(tree, repo_path);
+            let prefix = format!("{repo_path}/");
+            for file_path in &files {
+                let raw_url = format!(
+                    "https://raw.githubusercontent.com/{owner}/{repo}/{}/{}",
+                    skill.branch, file_path
+                );
+                let resp = client.get(&raw_url).send().await?;
+                if !resp.status().is_success() { continue; }
+                let content = resp.bytes().await?;
+                // Compute relative path within skill dir
+                let rel = file_path.strip_prefix(&prefix).unwrap_or(file_path);
+                let dest = skill_dir.join(rel);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&dest, &content)?;
+            }
+        } else {
+            // Fallback: Contents API (slower but works without tree)
+            Self::download_directory_recursive(
+                &client, owner, repo, &skill.branch, repo_path, &skill_dir,
+            ).await?;
+        }
 
         Ok(())
+    }
+
+    /// Install a single skill (backwards-compatible, uses Contents API fallback).
+    pub async fn install_single(skill: &MarketSkill, paths: &crate::core::paths::AppPaths) -> Result<()> {
+        Self::install_single_with_tree(skill, paths, None).await
     }
 
     /// Recursively download all files in a GitHub directory.
@@ -419,9 +458,36 @@ mod tests {
             enabled: true,
         };
 
-        let result = Market::extract_skills(&tree, &source);
+        let result = Market::extract_skills(tree, &source);
         assert!(result.plugin_detected);
         assert_eq!(result.skills.len(), 1);
+    }
+
+    #[test]
+    fn extract_file_paths_from_tree() {
+        let tree = GitTree {
+            tree: vec![
+                GitTreeNode { path: "README.md".into() },
+                GitTreeNode { path: "find-skills/SKILL.md".into() },
+                GitTreeNode { path: "deep-research/SKILL.md".into() },
+                GitTreeNode { path: "deep-research/agents/openai.yaml".into() },
+                GitTreeNode { path: "deep-research/prompts/search.md".into() },
+                GitTreeNode { path: "other-dir/not-a-skill.txt".into() },
+            ],
+        };
+
+        // Get files for find-skills (single file)
+        let files = Market::get_skill_files(&tree, "find-skills");
+        assert_eq!(files, vec!["find-skills/SKILL.md"]);
+
+        // Get files for deep-research (multiple files)
+        let mut files = Market::get_skill_files(&tree, "deep-research");
+        files.sort();
+        assert_eq!(files, vec![
+            "deep-research/SKILL.md",
+            "deep-research/agents/openai.yaml",
+            "deep-research/prompts/search.md",
+        ]);
     }
 
     #[test]

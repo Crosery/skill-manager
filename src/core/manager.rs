@@ -486,9 +486,9 @@ impl SkillManager {
 
         let mut skill_names = Vec::new();
 
-        // Step 2: Download each skill via Contents API (fast, only downloads needed files)
+        // Step 2: Download each skill using git tree (fast: raw downloads, no extra API calls)
         for skill in &extract.skills {
-            if let Err(e) = rt.block_on(Market::install_single(skill, self.paths())) {
+            if let Err(e) = rt.block_on(Market::install_single_with_tree(skill, self.paths(), Some(&extract.tree))) {
                 // Log error but continue with other skills
                 eprintln!("Warning: failed to install '{}': {e}", skill.name);
                 continue;
