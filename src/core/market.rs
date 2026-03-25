@@ -170,6 +170,32 @@ pub fn is_plugin_source(data_dir: &Path, source: &SourceEntry) -> bool {
     data_dir.join(CACHE_DIR).join(format!("{}.plugin", cache_key(source))).exists()
 }
 
+/// Find a skill in market cache by name, with optional source filter (matches label or repo_id).
+pub fn find_skill_in_sources(
+    data_dir: &Path,
+    sources: &[SourceEntry],
+    skill_name: &str,
+    source_filter: Option<&str>,
+) -> Option<MarketSkill> {
+    for src in sources {
+        if !src.enabled { continue; }
+        if let Some(filter) = source_filter {
+            let f = filter.to_lowercase();
+            if !src.label.to_lowercase().contains(&f)
+                && !src.repo_id().to_lowercase().contains(&f)
+            {
+                continue;
+            }
+        }
+        if let Some(cached) = load_cache(data_dir, src) {
+            if let Some(skill) = cached.into_iter().find(|s| s.name == skill_name) {
+                return Some(skill);
+            }
+        }
+    }
+    None
+}
+
 fn cache_key(source: &SourceEntry) -> String {
     format!("{}_{}", source.owner, source.repo)
 }
@@ -396,5 +422,50 @@ mod tests {
         let result = Market::extract_skills(&tree, &source);
         assert!(result.plugin_detected);
         assert_eq!(result.skills.len(), 1);
+    }
+
+    #[test]
+    fn find_skill_in_cache_matches_by_label_and_repo_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        // Create a source
+        let source = SourceEntry {
+            owner: "mxyhi".into(),
+            repo: "ok-skills".into(),
+            branch: "main".into(),
+            skill_prefix: String::new(),
+            label: "OK Skills".into(),
+            description: "test".into(),
+            builtin: false,
+            enabled: true,
+        };
+
+        // Save cache with a skill
+        let skills = vec![MarketSkill {
+            name: "find-skills".into(),
+            repo_path: "find-skills".into(),
+            source_label: "OK Skills".into(),
+            source_repo: "mxyhi/ok-skills".into(),
+            branch: "main".into(),
+            installed: false,
+        }];
+        save_cache(data_dir, &source, &skills).unwrap();
+
+        // Find by repo_id
+        let found = find_skill_in_sources(data_dir, &[source.clone()], "find-skills", Some("mxyhi/ok-skills"));
+        assert!(found.is_some(), "should find by repo_id");
+
+        // Find by label
+        let found = find_skill_in_sources(data_dir, &[source.clone()], "find-skills", Some("OK Skills"));
+        assert!(found.is_some(), "should find by label");
+
+        // Find without source filter
+        let found = find_skill_in_sources(data_dir, &[source], "find-skills", None);
+        assert!(found.is_some(), "should find without filter");
+
+        // Not found
+        let found = find_skill_in_sources(data_dir, &[], "nonexistent", None);
+        assert!(found.is_none(), "should not find nonexistent");
     }
 }

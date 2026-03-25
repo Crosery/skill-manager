@@ -459,6 +459,7 @@ impl SkillManager {
     // --- Install from GitHub ---
 
     /// Install skills from a GitHub repo, register in DB, create group, enable for target.
+    /// Uses Market API: first discovers skills via git tree, then downloads each via Contents API.
     /// Returns (group_id, skill_names).
     pub fn install_github_repo(
         &self,
@@ -467,28 +468,41 @@ impl SkillManager {
         branch: &str,
         target: CliTarget,
     ) -> Result<(String, Vec<String>)> {
-        use crate::core::installer::Installer;
+        use crate::core::market::{Market, SourceEntry};
 
-        // Download and extract skills
+        let source = SourceEntry::from_input(&format!("{owner}/{repo}@{branch}"))?;
         let rt = tokio::runtime::Runtime::new()?;
-        let results = rt.block_on(Installer::install_from_github(owner, repo, branch, self.paths()))?;
 
-        if results.is_empty() {
-            bail!("No skills found in {owner}/{repo}. This might be a Claude plugin — try: /plugin install {repo}");
+        // Step 1: Discover skills via git tree API (fast, single request)
+        let extract = rt.block_on(Market::fetch(&source))?;
+
+        if extract.plugin_detected && extract.skills.is_empty() {
+            bail!("This is a Claude Code plugin, not a skill collection.\n\
+                   Install with: /plugin install {repo}@<marketplace>");
+        }
+        if extract.skills.is_empty() {
+            bail!("No skills found in {owner}/{repo}");
         }
 
         let mut skill_names = Vec::new();
 
-        // Register each skill in DB
-        for r in &results {
-            let dir = self.paths.skills_dir().join(&r.name);
+        // Step 2: Download each skill via Contents API (fast, only downloads needed files)
+        for skill in &extract.skills {
+            if let Err(e) = rt.block_on(Market::install_single(skill, self.paths())) {
+                // Log error but continue with other skills
+                eprintln!("Warning: failed to install '{}': {e}", skill.name);
+                continue;
+            }
+
+            let resource_id = format!("github:{owner}/{repo}:{}", skill.name);
+            let dir = self.paths.skills_dir().join(&skill.name);
             let description = Self::extract_description(&dir);
             let resource = Resource {
-                id: r.resource_id.clone(),
-                name: r.name.clone(),
+                id: resource_id.clone(),
+                name: skill.name.clone(),
                 kind: ResourceKind::Skill,
                 description,
-                directory: dir.clone(),
+                directory: dir,
                 source: Source::GitHub {
                     owner: owner.to_string(),
                     repo: repo.to_string(),
@@ -498,13 +512,15 @@ impl SkillManager {
                 enabled: HashMap::new(),
             };
             let _ = self.db.insert_resource(&resource);
-
-            // Enable for target (create symlink)
-            let _ = self.enable_resource(&r.resource_id, target, None);
-            skill_names.push(r.name.clone());
+            let _ = self.enable_resource(&resource_id, target, None);
+            skill_names.push(skill.name.clone());
         }
 
-        // Auto-create group
+        if skill_names.is_empty() {
+            bail!("All skill downloads failed for {owner}/{repo}");
+        }
+
+        // Step 3: Auto-create group
         let group_id = repo.to_lowercase();
         let group = crate::core::group::Group {
             name: repo.to_string(),
@@ -515,9 +531,9 @@ impl SkillManager {
         };
         let _ = self.create_group(&group_id, &group);
 
-        // Add all skills to the group
-        for r in &results {
-            let _ = self.db.add_group_member(&group_id, &r.resource_id);
+        for name in &skill_names {
+            let rid = format!("github:{owner}/{repo}:{name}");
+            let _ = self.db.add_group_member(&group_id, &rid);
         }
 
         Ok((group_id, skill_names))
