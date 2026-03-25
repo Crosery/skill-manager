@@ -179,8 +179,27 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Install { source: _ }) => {
-            println!("Install — not yet implemented in CLI (use MCP interface)");
+        Some(Commands::Install { source }) => {
+            let input = source.trim()
+                .trim_start_matches("https://github.com/")
+                .trim_end_matches('/');
+            let (repo_part, branch) = if input.contains('@') {
+                let parts: Vec<&str> = input.splitn(2, '@').collect();
+                (parts[0], parts[1].to_string())
+            } else {
+                (input, "main".to_string())
+            };
+            let parts: Vec<&str> = repo_part.splitn(2, '/').collect();
+            if parts.len() != 2 {
+                anyhow::bail!("Invalid format. Use: owner/repo or owner/repo@branch");
+            }
+            let target = CliTarget::Claude;
+            println!("Installing from {}/{}@{branch}...", parts[0], parts[1]);
+            let (group_id, names) = mgr.install_github_repo(parts[0], parts[1], &branch, target)?;
+            println!("Installed {} skills, group '{group_id}':", names.len());
+            for name in &names {
+                println!("  {name}");
+            }
             Ok(())
         }
         Some(Commands::Uninstall { name }) => {
