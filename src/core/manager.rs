@@ -248,19 +248,16 @@ impl SkillManager {
             resources.extend(skills);
         }
 
-        // MCPs: entirely from config files (sorted for stable order)
+        // MCPs: from config files (enabled) + backup dir (disabled by SM)
         if kind.is_none() || kind == Some(ResourceKind::Mcp) {
             let mcp_status = Self::read_mcp_status_from_configs();
-            let mut mcp_names: Vec<_> = mcp_status.keys().collect();
-            mcp_names.sort();
-            for name in mcp_names {
-                let targets = &mcp_status[name];
-                if let Some(target) = enabled_for {
-                    if !targets.get(&target).copied().unwrap_or(false) {
-                        continue;
-                    }
-                }
-                resources.push(Resource {
+            let mut seen = std::collections::HashSet::new();
+            let mut mcp_resources = Vec::new();
+
+            // 1. Active MCPs from config files
+            for (name, targets) in &mcp_status {
+                seen.insert(name.clone());
+                mcp_resources.push(Resource {
                     id: format!("mcp:{name}"),
                     name: name.clone(),
                     kind: ResourceKind::Mcp,
@@ -271,6 +268,42 @@ impl SkillManager {
                     enabled: targets.clone(),
                 });
             }
+
+            // 2. Disabled MCPs from backup dir (removed from config by SM)
+            let mcps_dir = self.paths.mcps_dir();
+            if mcps_dir.exists() {
+                if let Ok(entries) = std::fs::read_dir(&mcps_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+                        let name = path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if name.is_empty() || seen.contains(&name) { continue; }
+                        // This MCP was disabled by SM — show as disabled
+                        mcp_resources.push(Resource {
+                            id: format!("mcp:{name}"),
+                            name,
+                            kind: ResourceKind::Mcp,
+                            description: String::new(),
+                            directory: PathBuf::new(),
+                            source: Source::Local { path: PathBuf::new() },
+                            installed_at: 0,
+                            enabled: HashMap::new(), // no targets = disabled
+                        });
+                    }
+                }
+            }
+
+            // Filter by enabled_for if requested
+            if let Some(target) = enabled_for {
+                mcp_resources.retain(|r| r.is_enabled_for(target));
+            }
+
+            // Sort for stable order
+            mcp_resources.sort_by(|a, b| a.name.cmp(&b.name));
+            resources.extend(mcp_resources);
         }
 
         Ok(resources)
@@ -697,25 +730,33 @@ mod tests {
     }
 
     #[test]
-    fn disabled_mcp_not_in_list_resources() {
+    fn disabled_mcp_still_visible_but_marked_disabled() {
         let tmp = tempfile::tempdir().unwrap();
         write_realistic_claude_json(tmp.path());
 
         with_home(tmp.path(), || {
             let mgr = SkillManager::with_base(tmp.path().join("sm-data")).unwrap();
 
-            // Before disable: 3 MCPs
+            // Before disable: 3 MCPs, all enabled
             let before = mgr.list_resources(Some(ResourceKind::Mcp), None).unwrap();
             assert_eq!(before.len(), 3);
+            let pencil_before = before.iter().find(|r| r.name == "pencil").unwrap();
+            assert!(pencil_before.is_enabled_for(CliTarget::Claude));
 
             // Disable pencil
             mgr.disable_resource("mcp:pencil", CliTarget::Claude, None).unwrap();
 
-            // After disable: 2 MCPs (pencil gone)
+            // After disable: still 3 MCPs, but pencil is disabled
             let after = mgr.list_resources(Some(ResourceKind::Mcp), None).unwrap();
-            assert_eq!(after.len(), 2);
-            assert!(after.iter().all(|r| r.name != "pencil"),
-                "pencil should not appear after disable");
+            assert_eq!(after.len(), 3, "disabled MCP should still be visible");
+            let pencil_after = after.iter().find(|r| r.name == "pencil")
+                .expect("pencil should still appear in list");
+            assert!(!pencil_after.is_enabled_for(CliTarget::Claude),
+                "pencil should show as disabled");
+
+            // Other MCPs unchanged
+            let github = after.iter().find(|r| r.name == "github").unwrap();
+            assert!(github.is_enabled_for(CliTarget::Claude));
         });
     }
 
