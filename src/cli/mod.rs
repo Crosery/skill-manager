@@ -16,6 +16,12 @@ pub struct Cli {
 pub enum Commands {
     /// Scan CLI directories and adopt unmanaged skills
     Scan,
+    /// Discover all SKILL.md files on disk (fast recursive search)
+    Discover {
+        /// Root directory to search (default: home directory)
+        #[arg(long)]
+        root: Option<String>,
+    },
     /// List resources
     List {
         #[arg(long)]
@@ -40,6 +46,12 @@ pub enum Commands {
     /// Install a skill from GitHub
     Install {
         source: String,
+    },
+    /// Install a skill from market
+    MarketInstall {
+        name: String,
+        #[arg(long)]
+        source: Option<String>,
     },
     /// Uninstall a resource
     Uninstall {
@@ -117,6 +129,20 @@ pub fn run(cli: Cli) -> Result<()> {
                 result.adopted, result.skipped, result.errors.len());
             for err in &result.errors {
                 eprintln!("  error: {err}");
+            }
+            Ok(())
+        }
+        Some(Commands::Discover { root }) => {
+            let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+            let search_root = root.map(std::path::PathBuf::from).unwrap_or(home);
+            println!("Scanning {}...", search_root.display());
+            let start = std::time::Instant::now();
+            let found = crate::core::scanner::Scanner::discover_skills(&search_root);
+            let elapsed = start.elapsed();
+            println!("Found {} skills in {:.1}s:\n", found.len(), elapsed.as_secs_f64());
+            for path in &found {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                println!("  {name:<40} {}", path.display());
             }
             Ok(())
         }
@@ -200,6 +226,22 @@ pub fn run(cli: Cli) -> Result<()> {
             for name in &names {
                 println!("  {name}");
             }
+            Ok(())
+        }
+        Some(Commands::MarketInstall { name, source }) => {
+            let data_dir = mgr.paths().data_dir().to_path_buf();
+            let sources = crate::core::market::load_sources(&data_dir);
+            let skill = crate::core::market::find_skill_in_sources(
+                &data_dir, &sources, &name, source.as_deref()
+            ).ok_or_else(|| anyhow::anyhow!("Skill '{name}' not found in market"))?;
+            let source_repo = skill.source_repo.clone();
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(crate::core::market::Market::install_single(&skill, mgr.paths()))?;
+            let _ = mgr.register_local_skill(&skill.name);
+            if let Some(id) = mgr.find_resource_id(&skill.name) {
+                let _ = mgr.enable_resource(&id, CliTarget::Claude, None);
+            }
+            println!("Installed '{name}' from {source_repo}");
             Ok(())
         }
         Some(Commands::Uninstall { name }) => {

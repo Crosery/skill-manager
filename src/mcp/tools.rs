@@ -509,38 +509,15 @@ impl SmServer {
         Json(TextResult { result: serde_json::to_string_pretty(&all_skills).unwrap_or_default() })
     }
 
-    #[tool(description = "Install a skill from the market by name. Downloads full skill directory, registers, enables, and adds to a group.")]
+    #[tool(description = "Install a skill from market. Returns a CLI command for the agent to run via Bash.")]
     fn sm_market_install(&self, Parameters(p): Parameters<MarketInstallParams>) -> Json<TextResult> {
-        let mgr = self.manager.lock().unwrap();
-        let data_dir = mgr.paths().data_dir().to_path_buf();
-        let sources = crate::core::market::load_sources(&data_dir);
-
-        let skill = match crate::core::market::find_skill_in_sources(
-            &data_dir, &sources, &p.name, p.source.as_deref()
-        ) {
-            Some(s) => s,
-            None => return Json(TextResult {
-                result: format!("Skill '{}' not found in market. Try sm_market to browse, or sm_install(repo='owner/repo') for GitHub repos.", p.name)
-            }),
-        };
-
-        let source_repo = skill.source_repo.clone();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = match rt.block_on(crate::core::market::Market::install_single(&skill, mgr.paths())) {
-            Ok(_) => {
-                let _ = mgr.register_local_skill(&skill.name);
-                // Enable for claude
-                if let Some(id) = mgr.find_resource_id(&skill.name) {
-                    let _ = mgr.enable_resource(&id, CliTarget::Claude, None);
-                }
-                format!(
-                    "Installed and enabled '{}' from {}.\nUse sm_disable to turn off, sm_group_add to organize.",
-                    skill.name, source_repo
-                )
-            }
-            Err(e) => format!("Install failed: {e}"),
-        };
-        Json(TextResult { result })
+        let mut cmd = format!("skill-manager market-install {}", p.name);
+        if let Some(src) = &p.source {
+            cmd.push_str(&format!(" --source '{src}'"));
+        }
+        Json(TextResult {
+            result: format!("Run this command via Bash tool:\n\n{cmd}\n\nDo NOT wait for MCP — CLI is much faster.")
+        })
     }
 
     #[tool(description = "Manage market sources. Actions: list, add (repo=owner/repo), remove (repo=owner/repo), enable (repo), disable (repo)")]

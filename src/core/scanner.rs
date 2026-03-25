@@ -68,6 +68,36 @@ impl Scanner {
         Ok(total)
     }
 
+    /// Fast recursive discovery: find all SKILL.md files under a root directory.
+    /// Skips common irrelevant dirs (.git, node_modules, target, .cache, etc.)
+    pub fn discover_skills(root: &Path) -> Vec<std::path::PathBuf> {
+        let skip = [".git", "node_modules", "target", ".cache", ".local", ".cargo",
+                     ".rustup", ".npm", ".pnpm", "venv", "__pycache__", ".venv",
+                     "dist", "build", ".next", ".nuxt"];
+        let mut results = Vec::new();
+        Self::walk_for_skills(root, &skip, &mut results, 0);
+        results
+    }
+
+    fn walk_for_skills(dir: &Path, skip: &[&str], results: &mut Vec<std::path::PathBuf>, depth: usize) {
+        if depth > 10 { return; } // prevent infinite recursion
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() { continue; }
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if skip.contains(&name_str.as_ref()) { continue; }
+            if path.join("SKILL.md").exists() {
+                results.push(path.clone());
+            }
+            Self::walk_for_skills(&path, skip, results, depth + 1);
+        }
+    }
+
     /// Scan the managed skills directory (~/.skill-manager/skills/) and register
     /// any skill that isn't already in the database.
     fn scan_managed_dir(paths: &AppPaths, db: &Database) -> ScanResult {
