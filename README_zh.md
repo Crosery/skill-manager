@@ -12,12 +12,17 @@
 - **多 CLI 支持** — 跨 4 个 AI CLI 统一管理，`1234` 切换目标
 - **分组管理** — 将 skills/MCPs 组织成组，批量启用/禁用，重命名
 - **一键安装** — `runai install owner/repo` 自动下载、注册、分组、启用
+- **市场安装** — 浏览 2000+ skills，TUI Market 标签页 Enter 直接安装
 - **Skill 发现** — 内置递归扫描器，秒级发现磁盘上所有 SKILL.md
-- **Skill 市场** — 浏览 2000+ 来自 5 个内置源的 skills，支持自定义 GitHub 源
-- **MCP 服务器** — 25 个工具通过 MCP 协议暴露，首次启动自动注册到所有 CLI
+- **统一搜索** — `sm_search` 同时搜索已安装资源和市场
+- **使用追踪** — 记录 skill 使用次数和最后使用时间，识别未使用的 skill
+- **MCP 服务器** — 30 个工具通过 MCP 协议暴露，首次启动自动注册到所有 CLI
+- **批量操作** — 批量启用/禁用/删除/安装，一次调用完成
+- **多 CLI 配置** — 原生支持：Claude JSON、Codex TOML、OpenCode 自定义 JSON、Gemini JSON
 - **深色/亮色主题** — 按 `t` 切换，适配两种终端背景
 - **文件系统为唯一数据源** — skill 启用 = 软链接存在；MCP 启用 = 配置条目存在
 - **备份与恢复** — 带时间戳的完整备份，包括 skill 文件、MCP 配置和 CLI 配置
+- **自动迁移** — 从 `skill-manager` 无缝升级到 `runai`（数据目录、数据库、软链接、MCP 条目）
 - **命令行** — 子命令支持脚本自动化
 
 ## 安装
@@ -31,7 +36,7 @@ cargo install --path .
 ## 快速开始
 
 ```bash
-# 启动 TUI（首次运行会自动扫描并注册 MCP）
+# 启动 TUI（首次运行会自动扫描、注册 MCP，并从 skill-manager 迁移）
 runai
 
 # 从 GitHub 安装 skills（自动下载、注册、分组、启用）
@@ -41,9 +46,11 @@ runai install MiniMax-AI/skills
 # 从市场安装
 runai market-install github
 
+# 查看使用统计
+runai usage --top 10
+
 # 发现磁盘上所有 skill
 runai discover
-runai discover --root /    # 全盘扫描
 
 # CLI 管理
 runai list                    # 列出所有 skills 和 MCPs
@@ -62,25 +69,29 @@ runai backup                  # 创建备份
 | `j/k` | 上下导航 |
 | `H/L` 或 `Tab` | 切换标签页（Skills / MCPs / Groups / Market） |
 | `Space` | 启用/禁用 |
+| `Enter` | 打开分组详情 / 从市场安装 |
 | `/` | 搜索过滤 |
+| `1234` | 切换 CLI 目标（Claude/Codex/Gemini/OpenCode） |
+| `i` | 从 GitHub 安装 |
 | `t` | 切换深色/亮色主题 |
 | `?` | 帮助面板（所有快捷键） |
 | `q` | 退出 |
 
-## MCP 工具（25 个）
+## MCP 工具（30 个）
 
-作为 MCP 服务器运行时（`runai mcp-serve`），提供 25 个工具：
+作为 MCP 服务器运行时（`runai mcp-serve`），提供 30 个工具：
 
 **Skills 和 MCPs**
 
 | 工具 | 说明 |
 |------|------|
-| `sm_list` | 列出 skills/MCPs（精简格式，支持按类型/分组/目标过滤） |
+| `sm_list` | 列出 skills/MCPs 及使用次数（支持按类型/分组/目标过滤） |
 | `sm_status` | 各 CLI 的启用/总数统计 |
 | `sm_enable` / `sm_disable` | 启用/禁用（支持模糊组名匹配） |
 | `sm_delete` | 删除 skill/MCP（文件 + 软链接 + 数据库） |
 | `sm_scan` | 扫描已知目录发现新 skills |
 | `sm_discover` | 全盘发现 SKILL.md，返回未管理的 skill 列表 |
+| `sm_search` | 统一搜索已安装资源 + 市场 |
 | `sm_batch_enable` / `sm_batch_disable` | 批量启用/禁用多个 |
 
 **安装**
@@ -88,8 +99,9 @@ runai backup                  # 创建备份
 | 工具 | 说明 |
 |------|------|
 | `sm_install` | 返回 CLI 安装命令（AI 通过 Bash 执行，避免代理超时） |
-| `sm_market` | 浏览缓存的市场 skills（按源/关键词过滤） |
+| `sm_market` | 浏览缓存的市场 skills（按源/关键词/路径过滤） |
 | `sm_market_install` | 返回市场安装 CLI 命令 |
+| `sm_batch_install` | 返回批量安装多个 skill 的 CLI 命令 |
 | `sm_sources` | 列出/添加/删除/启用/禁用市场源 |
 
 **分组**
@@ -102,6 +114,13 @@ runai backup                  # 创建备份
 | `sm_update_group` | 更新分组名称和/或描述 |
 | `sm_group_enable` / `sm_group_disable` | 批量启用/禁用分组成员（模糊组名匹配） |
 
+**使用追踪**
+
+| 工具 | 说明 |
+|------|------|
+| `sm_record_usage` | 记录 skill 或 MCP 的使用事件 |
+| `sm_usage_stats` | 查看使用统计，按使用次数排序 |
+
 **备份与工具**
 
 | 工具 | 说明 |
@@ -110,54 +129,38 @@ runai backup                  # 创建备份
 | `sm_restore` | 从备份恢复（默认最新，可指定时间戳） |
 | `sm_backups` | 列出所有可用备份 |
 | `sm_register` | 注册 MCP 到所有 CLI 配置 |
+| `sm_batch_delete` | 批量删除多个资源 |
 
-## 关键特性
+## 多 CLI 配置格式
 
-- **模糊组名匹配** — `sm_group_enable(name="superpower")` 自动匹配 `superpowers`
-- **安装委托 CLI** — MCP 工具返回 Bash 命令而非进程内下载（避免代理超时）
-- **精简输出** — `sm_list` 使用单行格式，避免超出 token 限制
-- **自动发现** — MCP 指令引导 AI 在市场没有结果时自动搜索 GitHub
-- **自我保护** — runai 拒绝禁用自身
-- **扫描 `~/skills/`** — 自动发现 SkillHub 安装的 skill
-
-## Skill 发现
-
-```bash
-runai discover               # 扫描 home 目录
-runai discover --root /      # 全盘扫描
-```
-
-内置递归扫描器，智能过滤：
-- **扫描**: `~/.skill-manager/skills/`、`~/.claude/skills/`、`~/skills/`、项目目录
-- **跳过**: plugins/marketplaces、IDE 扩展、备份目录、node_modules、.git
-- **分类**: `●` 已管理 / `◆` CLI 目录 / `○` 未管理（可导入）
-
-## 市场源
-
-内置源（在 Market 标签页按 `s` 管理）：
-
-| 源 | Skills 数量 | 默认状态 |
-|----|------------|----------|
-| Anthropic Official | 23 | 启用 |
-| Everything Claude Code | 125 | 启用 |
-| Terminal Skills | 900+ | 禁用 |
-| Antigravity Skills | 1300+ | 禁用 |
-| OK Skills | 55 | 禁用 |
-
-按 `a` 添加自定义源（格式：`owner/repo` 或 `owner/repo@branch`）。
+| CLI | 配置文件 | 格式 |
+|-----|---------|------|
+| Claude | `~/.claude.json` | JSON (`mcpServers`) |
+| Codex | `~/.codex/config.toml` | TOML (`[mcp_servers.*]`) |
+| Gemini | `~/.gemini/settings.json` | JSON (`mcpServers`) |
+| OpenCode | `~/.config/opencode/opencode.json` | JSON (`mcp`，command=数组) |
 
 ## 数据存储
 
-所有数据存储在 `~/.skill-manager/`：
+所有数据存储在 `~/.runai/`：
 - `skills/` — 托管的 skill 目录（每个包含 SKILL.md）
 - `mcps/` — 被禁用的 MCP 配置备份（JSON）
 - `groups/` — 分组定义（TOML 文件）
 - `backups/` — 带时间戳的完整备份
 - `market-cache/` — 市场 skill 列表缓存（JSON，1 小时有效期）
 - `market-sources.json` — 自定义市场源
-- `skill-manager.db` — SQLite 数据库（仅 skill 元数据 + 分组成员）
+- `runai.db` — SQLite 数据库（skill 元数据、使用统计、分组成员）
 
-> **注意**: 数据目录 `~/.skill-manager/` 保留不变，以兼容 v0.5.0 之前的版本。
+## 从 skill-manager 迁移
+
+Runai v0.5.0 首次启动时自动迁移：
+1. 数据目录：`~/.skill-manager/` → `~/.runai/`
+2. 数据库：`skill-manager.db` → `runai.db`
+3. 软链接：所有 CLI skill 软链接自动重新指向
+4. MCP 条目：所有 CLI 配置中 `skill-manager` → `runai`
+5. 环境变量：`RUNE_DATA_DIR` 和 `SKILL_MANAGER_DATA_DIR` 都可用
+
+无需手动操作，所有数据完整保留。
 
 ## 许可证
 
