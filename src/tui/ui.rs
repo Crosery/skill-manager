@@ -321,7 +321,7 @@ fn render_footer(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     let border = Style::default().fg(t.border);
     let version = env!("CARGO_PKG_VERSION");
 
-    let brand_text = format!(" Skill Manager v{version} ");
+    let brand_text = format!(" Runai v{version} ");
     let brand_len = brand_text.len() as u16 + 1;
 
     let footer_chunks =
@@ -329,7 +329,7 @@ fn render_footer(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
 
     // Left: brand + version
     let brand = Paragraph::new(Line::from(vec![
-        Span::styled(" Skill Manager ", Style::default().fg(t.brand).bold()),
+        Span::styled(" Runai ", Style::default().fg(t.brand).bold()),
         Span::styled(
             format!("v{version} "),
             Style::default().fg(t.version).italic(),
@@ -727,7 +727,7 @@ fn render_first_launch(f: &mut Frame, app: &App, t: &Theme, step: u8) {
             // Welcome
             let block = Block::default()
                 .title(Span::styled(
-                    " Welcome to Skill Manager ",
+                    " Welcome to Runai ",
                     Style::default().fg(t.brand).bold(),
                 ))
                 .borders(Borders::ALL)
