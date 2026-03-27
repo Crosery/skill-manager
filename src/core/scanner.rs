@@ -129,7 +129,8 @@ impl Scanner {
         Self::walk_for_skills(root, &mut raw, 0);
 
         let home = dirs::home_dir().unwrap_or_default();
-        let managed_dir = home.join(".skill-manager").join("skills");
+        let managed_dir = home.join(".runai").join("skills");
+        let managed_dir_old = home.join(".skill-manager").join("skills");
 
         raw.into_iter()
             .filter_map(|path| {
@@ -143,7 +144,8 @@ impl Scanner {
                 }
 
                 let name = path.file_name()?.to_str()?.to_string();
-                let status = if path.starts_with(&managed_dir) {
+                let status = if path.starts_with(&managed_dir) || path.starts_with(&managed_dir_old)
+                {
                     SkillStatus::Managed
                 } else if path_str.contains("/.claude/skills/")
                     || path_str.contains("/.codex/skills/")

@@ -886,7 +886,7 @@ impl App {
         ));
         if !scan_result.errors.is_empty() {
             self.scan_log.push(format!(
-                "  ⚠ {} errors (see ~/.skill-manager/scan.log)",
+                "  ⚠ {} errors (see ~/.runai/scan.log)",
                 scan_result.errors.len()
             ));
             let log_path = self.mgr.paths().data_dir().join("scan.log");
