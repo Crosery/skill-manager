@@ -444,9 +444,12 @@ impl SkillManager {
     ) -> Result<Vec<Resource>> {
         let mut resources = Vec::new();
 
-        // Skills: from DB, enabled state from symlinks
+        // Skills: from DB, enabled state from symlinks, deduplicated by name
         if kind.is_none() || kind == Some(ResourceKind::Skill) {
             let mut skills = self.db.list_resources(Some(ResourceKind::Skill), None)?;
+            // Deduplicate by name — keep first occurrence (alphabetical by id from DB)
+            let mut seen_names = std::collections::HashSet::new();
+            skills.retain(|s| seen_names.insert(s.name.clone()));
             for skill in &mut skills {
                 skill.enabled = self.check_skill_symlinks(&skill.name);
             }
@@ -534,10 +537,11 @@ impl SkillManager {
     fn check_skill_symlinks(&self, name: &str) -> HashMap<CliTarget, bool> {
         let mut map = HashMap::new();
         for target in CliTarget::ALL {
-            // Check primary (.agents/skills/) and legacy (skills/) locations
             let primary = target.skills_dir().join(name);
             let legacy = target.agents_skills_dir().join(name);
-            let enabled = primary.exists() || legacy.exists();
+            // Use symlink_metadata (doesn't follow symlink) to detect even broken symlinks,
+            // plus exists() for real directories
+            let enabled = primary.symlink_metadata().is_ok() || legacy.symlink_metadata().is_ok();
             map.insert(*target, enabled);
         }
         map
@@ -1856,6 +1860,83 @@ args = []
             assert_eq!(cmd[2], "@anthropic-ai/pencil-mcp");
             assert_eq!(pencil["enabled"], true);
             assert_eq!(pencil["type"], "local");
+        });
+    }
+
+    #[test]
+    fn list_resources_deduplicates_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sm_data = tmp.path().join("sm-data");
+        let skills_dir = sm_data.join("skills");
+        std::fs::create_dir_all(skills_dir.join("dupe")).unwrap();
+        std::fs::write(skills_dir.join("dupe/SKILL.md"), "# Dupe").unwrap();
+
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(sm_data.clone()).unwrap();
+            // Register same name with two different IDs
+            mgr.register_local_skill("dupe").unwrap();
+            // Manually insert a second resource with different ID but same name
+            let source = crate::core::resource::Source::Adopted {
+                original_cli: "codex".into(),
+            };
+            let res = crate::core::resource::Resource {
+                id: "adopted:dupe".into(),
+                name: "dupe".into(),
+                kind: crate::core::resource::ResourceKind::Skill,
+                description: "duplicate".into(),
+                directory: skills_dir.join("dupe"),
+                source,
+                installed_at: 0,
+                enabled: std::collections::HashMap::new(),
+                usage_count: 0,
+                last_used_at: None,
+            };
+            mgr.db().insert_resource(&res).unwrap();
+
+            let skills = mgr
+                .list_resources(Some(crate::core::resource::ResourceKind::Skill), None)
+                .unwrap();
+            let dupe_count = skills.iter().filter(|s| s.name == "dupe").count();
+            assert_eq!(
+                dupe_count, 1,
+                "should deduplicate by name, got {dupe_count}"
+            );
+        });
+    }
+
+    #[test]
+    fn check_symlinks_uses_is_symlink_not_exists() {
+        // Verifies that a symlink whose target doesn't exist is still detected
+        let tmp = tempfile::tempdir().unwrap();
+        let sm_data = tmp.path().join("sm-data");
+        let skills_dir = sm_data.join("skills");
+        std::fs::create_dir_all(skills_dir.join("test-skill")).unwrap();
+        std::fs::write(skills_dir.join("test-skill/SKILL.md"), "# Test").unwrap();
+
+        // Create CLI skills dir with a broken symlink (target doesn't exist)
+        let claude_skills = tmp.path().join(".claude/skills");
+        std::fs::create_dir_all(&claude_skills).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            "/nonexistent/path/test-skill",
+            claude_skills.join("test-skill"),
+        )
+        .unwrap();
+
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(sm_data.clone()).unwrap();
+            mgr.register_local_skill("test-skill").unwrap();
+
+            let skills = mgr
+                .list_resources(Some(crate::core::resource::ResourceKind::Skill), None)
+                .unwrap();
+            let skill = skills.iter().find(|s| s.name == "test-skill").unwrap();
+            // Even though symlink target is broken, skill should show as enabled
+            // because a symlink EXISTS in the CLI skills dir
+            assert!(
+                skill.is_enabled_for(CliTarget::Claude),
+                "broken symlink should still count as enabled"
+            );
         });
     }
 
