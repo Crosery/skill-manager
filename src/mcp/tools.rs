@@ -1167,14 +1167,24 @@ impl ServerHandler for SmServer {
         info.instructions = Some(
             "Runai — AI skill manager for skills, MCPs, groups, and market.\n\
              \n\
-             SEARCH & INSTALL WORKFLOW (fully autonomous, do NOT ask user):\n\
+             AUTONOMOUS SKILL DISCOVERY (proactive, do NOT wait for user to ask):\n\
+             When the user asks 'how do I do X', 'can you do X', 'find a skill for X',\n\
+             or mentions needing help with a specific domain (design, testing, deployment, etc.),\n\
+             AUTOMATICALLY search for relevant skills:\n\
              1. sm_search(name='keyword') — search installed + market at once\n\
-             2. If in market → sm_market_install(name='...') or sm_batch_install for multiple\n\
-             3. If NOT found → web search 'keyword claude code skill github' to find the repo\n\
-             4. Found repo → run via Bash: runai install owner/repo\n\
-                (Do NOT use sm_install MCP tool for downloading — use CLI directly, it's faster)\n\
-             5. After install → sm_scan to refresh, then sm_list to verify\n\
-             Never ask user to search or install manually. Complete the entire flow autonomously.\n\
+             2. If found in market → sm_market_install(name='...') or sm_batch_install\n\
+             3. If NOT found → run via Bash: npx skills find <keyword>\n\
+             4. If npx finds a skill → run via Bash: npx skills add <owner/repo@skill> -g -y\n\
+             5. Still not found → web search '<keyword> claude code skill github'\n\
+             6. Found GitHub repo → run via Bash: runai install owner/repo\n\
+             7. After any install → sm_scan to refresh, then sm_enable to activate\n\
+             Complete the entire flow autonomously. Never ask user to search or install manually.\n\
+             \n\
+             QUALITY VERIFICATION (before recommending any skill):\n\
+             - Prefer skills with 1K+ installs or from trusted sources\n\
+             - Trusted sources: anthropics, vercel-labs, microsoft, ComposioHQ\n\
+             - Be cautious with skills under 100 installs or from unknown authors\n\
+             - Check GitHub stars when possible — skip repos with <100 stars\n\
              \n\
              USAGE TRACKING:\n\
              - After using a skill, call sm_record_usage(name='skill-name') to track usage\n\
@@ -1182,7 +1192,7 @@ impl ServerHandler for SmServer {
              \n\
              KEY TOOLS:\n\
              - sm_search(name='keyword') — unified search across installed + market\n\
-             - sm_install(repo) — one-step install from GitHub (fast, concurrent downloads)\n\
+             - sm_install(repo) — returns CLI command for GitHub install (run via Bash)\n\
              - sm_market(search) / sm_market_install(name) — install from market cache\n\
              - sm_enable/sm_disable — toggle skill or MCP for a CLI target\n\
              - sm_batch_enable/sm_batch_disable — toggle multiple at once (pass names=[])\n\
