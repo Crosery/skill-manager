@@ -118,6 +118,33 @@ fn builtin_sources() -> Vec<SourceEntry> {
             "Curated agent skills & playbooks (55)",
             false,
         ),
+        SourceEntry::builtin(
+            "vercel-labs",
+            "agent-skills",
+            "main",
+            "",
+            "Vercel Agent Skills",
+            "React, Next.js, web design skills (100K+ installs)",
+            false,
+        ),
+        SourceEntry::builtin(
+            "anthropics",
+            "skills",
+            "main",
+            "",
+            "Anthropic Skills",
+            "Frontend design, document processing skills (100K+ installs)",
+            false,
+        ),
+        SourceEntry::builtin(
+            "ComposioHQ",
+            "awesome-claude-skills",
+            "main",
+            "",
+            "Composio Skills",
+            "Community curated Claude skills collection",
+            false,
+        ),
     ]
 }
 
@@ -806,6 +833,32 @@ mod tests {
             tasks[0]
                 .url
                 .starts_with("https://raw.githubusercontent.com/test/repo/main/")
+        );
+    }
+
+    #[test]
+    fn builtin_sources_include_skills_sh_ecosystem() {
+        let sources = builtin_sources();
+        let repo_ids: Vec<String> = sources.iter().map(|s| s.repo_id()).collect();
+
+        // skills.sh 生态源
+        assert!(
+            repo_ids.contains(&"vercel-labs/agent-skills".to_string()),
+            "missing vercel-labs/agent-skills"
+        );
+        assert!(
+            repo_ids.contains(&"anthropics/skills".to_string()),
+            "missing anthropics/skills"
+        );
+        assert!(
+            repo_ids.contains(&"ComposioHQ/awesome-claude-skills".to_string()),
+            "missing ComposioHQ/awesome-claude-skills"
+        );
+
+        // 原有源仍在
+        assert!(
+            repo_ids.contains(&"anthropics/claude-plugins-official".to_string()),
+            "missing anthropics/claude-plugins-official"
         );
     }
 }
