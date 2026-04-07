@@ -359,12 +359,13 @@ pub fn unregister_dazi_mcp(home: &Path) {
         }
         if let Ok(content) = std::fs::read_to_string(path) {
             if let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(servers) = config
-                    .get_mut("mcpServers")
-                    .and_then(|s| s.as_object_mut())
+                if let Some(servers) = config.get_mut("mcpServers").and_then(|s| s.as_object_mut())
                 {
                     if servers.remove(DAZI_MCP_NAME).is_some() {
-                        let _ = std::fs::write(path, serde_json::to_string_pretty(&config).unwrap_or_default());
+                        let _ = std::fs::write(
+                            path,
+                            serde_json::to_string_pretty(&config).unwrap_or_default(),
+                        );
                     }
                 }
             }
@@ -380,8 +381,8 @@ pub struct DaziClient {
 
 impl DaziClient {
     pub fn new() -> Self {
-        let base_url = std::env::var("DAZI_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        let base_url =
+            std::env::var("DAZI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         Self { base_url }
     }
 
@@ -392,9 +393,7 @@ impl DaziClient {
     }
 
     fn client() -> Result<reqwest::Client> {
-        Ok(reqwest::Client::builder()
-            .user_agent("runai/0.5")
-            .build()?)
+        Ok(reqwest::Client::builder().user_agent("runai/0.5").build()?)
     }
 
     /// Fetch all published skills.

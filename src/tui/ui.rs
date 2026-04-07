@@ -43,7 +43,11 @@ fn render_header(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
 
     // Left: tabs only, flush left
     let tab_labels = [
-        i.tab_skills(), i.tab_mcps(), i.tab_groups(), i.tab_market(), i.tab_dazi(),
+        i.tab_skills(),
+        i.tab_mcps(),
+        i.tab_groups(),
+        i.tab_market(),
+        i.tab_dazi(),
     ];
     let mut tab_spans = Vec::new();
     tab_spans.push(Span::raw(" "));
@@ -77,9 +81,15 @@ fn render_header(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
             Style::default().fg(t.brand).bold(),
         ),
         Span::styled(format!("{es}"), Style::default().fg(t.status_skills).bold()),
-        Span::styled(format!("/{ts} {}  ", i.status_skills()), Style::default().fg(t.status_dim)),
+        Span::styled(
+            format!("/{ts} {}  ", i.status_skills()),
+            Style::default().fg(t.status_dim),
+        ),
         Span::styled(format!("{em}"), Style::default().fg(t.status_mcps).bold()),
-        Span::styled(format!("/{tm} {}", i.status_mcp()), Style::default().fg(t.status_dim)),
+        Span::styled(
+            format!("/{tm} {}", i.status_mcp()),
+            Style::default().fg(t.status_dim),
+        ),
     ]))
     .alignment(Alignment::Right)
     .block(
@@ -277,7 +287,11 @@ fn render_market(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
 
     let title_text = if app.current_source_loading() {
         let label = source.map(|s| s.label.as_str()).unwrap_or("...");
-        format!(" {} — {} {label}... ", i.tab_market(), i.title_market_loading())
+        format!(
+            " {} — {} {label}... ",
+            i.tab_market(),
+            i.title_market_loading()
+        )
     } else if let Some(src) = source {
         let custom_tag = if src.builtin { "" } else { " ★" };
         format!(
@@ -432,9 +446,7 @@ fn render_dazi(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     };
 
     let count = items.len();
-    let title_text = format!(
-        " 搭子 — {kind_label} ({count}){loading_indicator} ◀ [ ] ▶ "
-    );
+    let title_text = format!(" 搭子 — {kind_label} ({count}){loading_indicator} ◀ [ ] ▶ ");
 
     let list = List::new(items)
         .block(
@@ -454,10 +466,7 @@ fn render_dazi(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
 fn render_footer(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     let i = T::new(app.lang);
     let (left, right) = match app.mode {
-        InputMode::Search => (
-            format!(" /{} ", app.search),
-            i.help_search().to_string(),
-        ),
+        InputMode::Search => (format!(" /{} ", app.search), i.help_search().to_string()),
         InputMode::Normal => {
             let search_info = if !app.search.is_empty() {
                 format!(" filter: {} ", app.search)
@@ -515,7 +524,10 @@ fn render_create_dialog(f: &mut Frame, app: &App, t: &Theme, step: u8) {
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(Span::styled(i.title_create_group(step), Style::default().fg(t.brand).bold()))
+        .title(Span::styled(
+            i.title_create_group(step),
+            Style::default().fg(t.brand).bold(),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(t.text_highlight));
@@ -600,7 +612,10 @@ fn render_install_dialog(f: &mut Frame, app: &App, t: &Theme) {
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(Span::styled(i.title_install(), Style::default().fg(t.brand).bold()))
+        .title(Span::styled(
+            i.title_install(),
+            Style::default().fg(t.brand).bold(),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(t.text_highlight));
@@ -609,7 +624,10 @@ fn render_install_dialog(f: &mut Frame, app: &App, t: &Theme) {
 
     let lines = vec![
         Line::from(""),
-        Line::from(Span::styled(i.install_prompt(), Style::default().fg(t.item_desc))),
+        Line::from(Span::styled(
+            i.install_prompt(),
+            Style::default().fg(t.item_desc),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::raw("  > "),
@@ -685,9 +703,7 @@ fn render_group_detail(f: &mut Frame, app: &App, t: &Theme) {
         format!(" [{target_name}] "),
         Style::default().fg(t.text_highlight).bold(),
     )];
-    help_spans.extend(
-        styled_help(i.help_group_detail(), t).spans,
-    );
+    help_spans.extend(styled_help(i.help_group_detail(), t).spans);
     f.render_widget(Paragraph::new(Line::from(help_spans)), chunks[1]);
 }
 
@@ -764,7 +780,10 @@ fn render_source_manager(f: &mut Frame, app: &App, t: &Theme) {
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(Span::styled(i.title_sources(), Style::default().fg(t.brand).bold()))
+        .title(Span::styled(
+            i.title_sources(),
+            Style::default().fg(t.brand).bold(),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(t.text_highlight));
@@ -808,10 +827,7 @@ fn render_source_manager(f: &mut Frame, app: &App, t: &Theme) {
     state.select(Some(app.source_pick_idx));
     f.render_stateful_widget(list, chunks[0], &mut state);
 
-    f.render_widget(
-        Paragraph::new(styled_help(i.help_sources(), t)),
-        chunks[1],
-    );
+    f.render_widget(Paragraph::new(styled_help(i.help_sources(), t)), chunks[1]);
 }
 
 fn render_add_source_dialog(f: &mut Frame, app: &App, t: &Theme) {
@@ -820,7 +836,10 @@ fn render_add_source_dialog(f: &mut Frame, app: &App, t: &Theme) {
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(Span::styled(i.title_add_source(), Style::default().fg(t.brand).bold()))
+        .title(Span::styled(
+            i.title_add_source(),
+            Style::default().fg(t.brand).bold(),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(t.text_highlight));
@@ -829,8 +848,14 @@ fn render_add_source_dialog(f: &mut Frame, app: &App, t: &Theme) {
 
     let lines = vec![
         Line::from(""),
-        Line::from(Span::styled(i.add_source_prompt(), Style::default().fg(t.item_desc))),
-        Line::from(Span::styled(i.add_source_example(), Style::default().fg(t.text_dim))),
+        Line::from(Span::styled(
+            i.add_source_prompt(),
+            Style::default().fg(t.item_desc),
+        )),
+        Line::from(Span::styled(
+            i.add_source_example(),
+            Style::default().fg(t.text_dim),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::raw("  > "),
@@ -851,7 +876,10 @@ fn render_first_launch(f: &mut Frame, app: &App, t: &Theme, step: u8) {
     match step {
         0 => {
             let block = Block::default()
-                .title(Span::styled(i.title_welcome(), Style::default().fg(t.brand).bold()))
+                .title(Span::styled(
+                    i.title_welcome(),
+                    Style::default().fg(t.brand).bold(),
+                ))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(t.text_highlight));
@@ -861,13 +889,31 @@ fn render_first_launch(f: &mut Frame, app: &App, t: &Theme, step: u8) {
             let (k1, d1, k2, d2) = i.welcome_keys();
             let lines = vec![
                 Line::from(""),
-                Line::from(Span::styled(i.welcome_detected(), Style::default().fg(t.text).bold())),
+                Line::from(Span::styled(
+                    i.welcome_detected(),
+                    Style::default().fg(t.text).bold(),
+                )),
                 Line::from(""),
-                Line::from(Span::styled(i.welcome_will(), Style::default().fg(t.item_desc))),
-                Line::from(Span::styled(i.welcome_scan_dirs(), Style::default().fg(t.item_desc))),
-                Line::from(Span::styled(i.welcome_scan_dirs2(), Style::default().fg(t.text_dim))),
-                Line::from(Span::styled(i.welcome_discover_mcp(), Style::default().fg(t.item_desc))),
-                Line::from(Span::styled(i.welcome_auto_group(), Style::default().fg(t.item_desc))),
+                Line::from(Span::styled(
+                    i.welcome_will(),
+                    Style::default().fg(t.item_desc),
+                )),
+                Line::from(Span::styled(
+                    i.welcome_scan_dirs(),
+                    Style::default().fg(t.item_desc),
+                )),
+                Line::from(Span::styled(
+                    i.welcome_scan_dirs2(),
+                    Style::default().fg(t.text_dim),
+                )),
+                Line::from(Span::styled(
+                    i.welcome_discover_mcp(),
+                    Style::default().fg(t.item_desc),
+                )),
+                Line::from(Span::styled(
+                    i.welcome_auto_group(),
+                    Style::default().fg(t.item_desc),
+                )),
                 Line::from(""),
                 Line::from(""),
                 Line::from(vec![
@@ -881,7 +927,10 @@ fn render_first_launch(f: &mut Frame, app: &App, t: &Theme, step: u8) {
         }
         1 => {
             let block = Block::default()
-                .title(Span::styled(i.title_scanning(), Style::default().fg(t.tag_warning).bold()))
+                .title(Span::styled(
+                    i.title_scanning(),
+                    Style::default().fg(t.tag_warning).bold(),
+                ))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(t.text_highlight));
@@ -890,7 +939,10 @@ fn render_first_launch(f: &mut Frame, app: &App, t: &Theme, step: u8) {
 
             let mut lines = vec![
                 Line::from(""),
-                Line::from(Span::styled(i.scanning_msg(), Style::default().fg(t.text).bold())),
+                Line::from(Span::styled(
+                    i.scanning_msg(),
+                    Style::default().fg(t.text).bold(),
+                )),
                 Line::from(""),
             ];
             for log_line in &app.scan_log {
@@ -900,12 +952,18 @@ fn render_first_launch(f: &mut Frame, app: &App, t: &Theme, step: u8) {
                 )));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(i.scanning_wait(), Style::default().fg(t.text_dim))));
+            lines.push(Line::from(Span::styled(
+                i.scanning_wait(),
+                Style::default().fg(t.text_dim),
+            )));
             f.render_widget(Paragraph::new(lines), inner);
         }
         2 => {
             let block = Block::default()
-                .title(Span::styled(i.title_scan_done(), Style::default().fg(t.tag_enabled).bold()))
+                .title(Span::styled(
+                    i.title_scan_done(),
+                    Style::default().fg(t.tag_enabled).bold(),
+                ))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(t.text_highlight));
@@ -933,16 +991,28 @@ fn render_first_launch(f: &mut Frame, app: &App, t: &Theme, step: u8) {
             if let Some(info) = &app.first_launch_info {
                 lines.push(Line::from(vec![
                     Span::styled(i.scan_skills_found(), Style::default().fg(t.item_desc)),
-                    Span::styled(format!("{}", info.skills_found), Style::default().fg(t.status_skills).bold()),
+                    Span::styled(
+                        format!("{}", info.skills_found),
+                        Style::default().fg(t.status_skills).bold(),
+                    ),
                 ]));
                 lines.push(Line::from(vec![
                     Span::styled(i.scan_mcps_found(), Style::default().fg(t.item_desc)),
-                    Span::styled(format!("{}", info.mcps_found), Style::default().fg(t.status_mcps).bold()),
+                    Span::styled(
+                        format!("{}", info.mcps_found),
+                        Style::default().fg(t.status_mcps).bold(),
+                    ),
                 ]));
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(i.scan_continue(), Style::default().fg(t.text_dim))));
+                lines.push(Line::from(Span::styled(
+                    i.scan_continue(),
+                    Style::default().fg(t.text_dim),
+                )));
             } else {
-                lines.push(Line::from(Span::styled(i.scan_in_progress(), Style::default().fg(t.item_desc))));
+                lines.push(Line::from(Span::styled(
+                    i.scan_in_progress(),
+                    Style::default().fg(t.item_desc),
+                )));
             }
 
             f.render_widget(Paragraph::new(lines), inner);
@@ -958,7 +1028,10 @@ fn render_rename_dialog(f: &mut Frame, app: &App, t: &Theme) {
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(Span::styled(i.title_rename_group(), Style::default().fg(t.brand).bold()))
+        .title(Span::styled(
+            i.title_rename_group(),
+            Style::default().fg(t.brand).bold(),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(t.text_highlight));
@@ -967,7 +1040,10 @@ fn render_rename_dialog(f: &mut Frame, app: &App, t: &Theme) {
 
     let lines = vec![
         Line::from(""),
-        Line::from(Span::styled(i.rename_prompt(), Style::default().fg(t.item_desc))),
+        Line::from(Span::styled(
+            i.rename_prompt(),
+            Style::default().fg(t.item_desc),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::raw("  > "),
@@ -986,7 +1062,10 @@ fn render_help(f: &mut Frame, app: &App, t: &Theme) {
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(Span::styled(i.title_keybindings(), Style::default().fg(t.brand).bold()))
+        .title(Span::styled(
+            i.title_keybindings(),
+            Style::default().fg(t.brand).bold(),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(t.text_highlight));
@@ -1000,26 +1079,65 @@ fn render_help(f: &mut Frame, app: &App, t: &Theme) {
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(i.help_section_nav(), ss)),
-        Line::from(vec![Span::styled(" g/G     ", ks), Span::styled(i.help_g(), ds)]),
-        Line::from(vec![Span::styled(" 1234    ", ks), Span::styled(i.help_1234(), ds)]),
-        Line::from(vec![Span::styled(" f       ", ks), Span::styled(i.help_f(), ds)]),
+        Line::from(vec![
+            Span::styled(" g/G     ", ks),
+            Span::styled(i.help_g(), ds),
+        ]),
+        Line::from(vec![
+            Span::styled(" 1234    ", ks),
+            Span::styled(i.help_1234(), ds),
+        ]),
+        Line::from(vec![
+            Span::styled(" f       ", ks),
+            Span::styled(i.help_f(), ds),
+        ]),
         Line::from(""),
         Line::from(Span::styled(i.help_section_skills(), ss)),
-        Line::from(vec![Span::styled(" Enter   ", ks), Span::styled(i.help_enter(), ds)]),
-        Line::from(vec![Span::styled(" s       ", ks), Span::styled(i.help_s(), ds)]),
-        Line::from(vec![Span::styled(" i       ", ks), Span::styled(i.help_i(), ds)]),
-        Line::from(vec![Span::styled(" d       ", ks), Span::styled(i.help_d(), ds)]),
+        Line::from(vec![
+            Span::styled(" Enter   ", ks),
+            Span::styled(i.help_enter(), ds),
+        ]),
+        Line::from(vec![
+            Span::styled(" s       ", ks),
+            Span::styled(i.help_s(), ds),
+        ]),
+        Line::from(vec![
+            Span::styled(" i       ", ks),
+            Span::styled(i.help_i(), ds),
+        ]),
+        Line::from(vec![
+            Span::styled(" d       ", ks),
+            Span::styled(i.help_d(), ds),
+        ]),
         Line::from(""),
         Line::from(Span::styled(i.help_section_groups(), ss)),
-        Line::from(vec![Span::styled(" c       ", ks), Span::styled(i.help_c(), ds)]),
-        Line::from(vec![Span::styled(" r       ", ks), Span::styled(i.help_r(), ds)]),
-        Line::from(vec![Span::styled(" a       ", ks), Span::styled(i.help_a(), ds)]),
+        Line::from(vec![
+            Span::styled(" c       ", ks),
+            Span::styled(i.help_c(), ds),
+        ]),
+        Line::from(vec![
+            Span::styled(" r       ", ks),
+            Span::styled(i.help_r(), ds),
+        ]),
+        Line::from(vec![
+            Span::styled(" a       ", ks),
+            Span::styled(i.help_a(), ds),
+        ]),
         Line::from(""),
         Line::from(Span::styled(i.help_section_market(), ss)),
-        Line::from(vec![Span::styled(" [ ]     ", ks), Span::styled(i.help_brackets(), ds)]),
-        Line::from(vec![Span::styled(" s       ", ks), Span::styled(i.help_s_market(), ds)]),
+        Line::from(vec![
+            Span::styled(" [ ]     ", ks),
+            Span::styled(i.help_brackets(), ds),
+        ]),
+        Line::from(vec![
+            Span::styled(" s       ", ks),
+            Span::styled(i.help_s_market(), ds),
+        ]),
         Line::from(""),
-        Line::from(Span::styled(i.help_close(), Style::default().fg(t.text_dim))),
+        Line::from(Span::styled(
+            i.help_close(),
+            Style::default().fg(t.text_dim),
+        )),
     ];
 
     f.render_widget(Paragraph::new(lines), inner);
