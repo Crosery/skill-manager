@@ -959,13 +959,11 @@ impl SmServer {
             })
         }
     }
-
 }
 
 // ── Dazi marketplace tools (conditionally compiled) ──
 #[cfg(feature = "dazi")]
 mod dazi_tools;
-
 
 #[tool_handler]
 impl ServerHandler for SmServer {

@@ -93,7 +93,10 @@ fn check_binary() -> CheckResult {
 /// Check data directory exists and is writable.
 fn check_data_dir(data_dir: &Path) -> CheckResult {
     if !data_dir.exists() {
-        return CheckResult::fail("Data dir", &format!("{} does not exist", data_dir.display()));
+        return CheckResult::fail(
+            "Data dir",
+            &format!("{} does not exist", data_dir.display()),
+        );
     }
     // Test write
     let test_file = data_dir.join(".doctor-test");
@@ -113,7 +116,10 @@ fn check_data_dir(data_dir: &Path) -> CheckResult {
 fn check_database(data_dir: &Path) -> CheckResult {
     let db_path = data_dir.join("runai.db");
     if !db_path.exists() {
-        return CheckResult::warn("Database", "runai.db not found (will be created on first use)");
+        return CheckResult::warn(
+            "Database",
+            "runai.db not found (will be created on first use)",
+        );
     }
     match rusqlite::Connection::open(&db_path) {
         Ok(conn) => match conn.query_row("SELECT COUNT(*) FROM resources", [], |row| {
@@ -156,10 +162,9 @@ fn check_mcp_server() -> CheckResult {
             let _ = child.wait();
             CheckResult::ok("MCP server", "starts and listens on stdio")
         }
-        Ok(Some(status)) => CheckResult::fail(
-            "MCP server",
-            &format!("crashed on startup (exit {status})"),
-        ),
+        Ok(Some(status)) => {
+            CheckResult::fail("MCP server", &format!("crashed on startup (exit {status})"))
+        }
         Err(e) => CheckResult::fail("MCP server", &format!("check failed: {e}")),
     }
 }
@@ -325,10 +330,7 @@ fn check_symlinks(home: &Path) -> CheckResult {
 
     if broken > 0 {
         let names = broken_names.join(", ");
-        CheckResult::warn(
-            "Symlinks",
-            &format!("{broken}/{total} broken: {names}"),
-        )
+        CheckResult::warn("Symlinks", &format!("{broken}/{total} broken: {names}"))
     } else {
         CheckResult::ok("Symlinks", &format!("{total} symlinks, all valid"))
     }
