@@ -19,11 +19,14 @@ pub struct SmServer {
 impl SmServer {
     pub fn new() -> Result<Self> {
         let manager = SkillManager::new()?;
-        let mut router = Self::tool_router();
+        #[cfg(not(feature = "dazi"))]
+        let router = Self::tool_router();
         #[cfg(feature = "dazi")]
-        {
-            router.merge(Self::dazi_tool_router());
-        }
+        let router = {
+            let mut r = Self::tool_router();
+            r.merge(Self::dazi_tool_router());
+            r
+        };
         Ok(Self {
             manager: Mutex::new(manager),
             tool_router: router,

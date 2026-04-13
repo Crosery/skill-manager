@@ -284,18 +284,35 @@ impl SkillManager {
     }
 
     /// Enable MCP: restore saved config back into CLI config file.
+    ///
+    /// If no backup exists (MCP was never disabled from this CLI), falls back to
+    /// discovering the MCP definition from any other registered CLI config and
+    /// cross-registering it into the target CLI. This allows enabling a
+    /// Claude-only MCP for Codex without requiring a prior disable/backup cycle.
     fn restore_mcp(&self, mcp_name: &str, target: CliTarget) -> Result<()> {
         let config_path = Self::cli_config_path(target);
 
-        // Read backup
+        // Read backup — fall back to discovery if no backup exists
         let backup_path = self.paths.mcps_dir().join(format!("{mcp_name}.json"));
-        if !backup_path.exists() {
-            bail!(
-                "No saved config for MCP '{mcp_name}'. Use 'claude mcp add' to register it first."
-            );
-        }
-        let backup_content = std::fs::read_to_string(&backup_path)?;
-        let mut entry: serde_json::Value = serde_json::from_str(&backup_content)?;
+        let mut entry: serde_json::Value = if backup_path.exists() {
+            let backup_content = std::fs::read_to_string(&backup_path)?;
+            serde_json::from_str(&backup_content)?
+        } else {
+            // No backup: try to discover from any CLI config that has this MCP
+            let home = dirs::home_dir().unwrap_or_default();
+            let discovered = crate::core::mcp_discovery::McpDiscovery::discover_all(&home);
+            let found = discovered.into_iter().find(|e| e.name == mcp_name);
+            match found {
+                Some(e) => serde_json::json!({
+                    "command": e.command,
+                    "args": e.args,
+                }),
+                None => bail!(
+                    "MCP '{mcp_name}' not found in any CLI config. \
+                     Register it first with your CLI (e.g. 'claude mcp add')."
+                ),
+            }
+        };
 
         // Remove disabled field if present (clean restore)
         if let Some(obj) = entry.as_object_mut() {
@@ -2003,6 +2020,109 @@ args = []
             assert!(
                 !claude_skills.join("test-skill").symlink_metadata().is_ok(),
                 "symlink should be removed"
+            );
+        });
+    }
+
+    // ── Cross-CLI MCP registration tests ──
+
+    /// When an MCP exists only in Claude's config and the user tries to enable it
+    /// for Codex, runai should discover the definition from Claude and register it
+    /// in Codex's config.toml — instead of failing with "No saved config".
+    #[test]
+    fn enable_mcp_for_codex_when_only_in_claude_cross_registers() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // design-gateway is only in Claude's config
+        let claude_config = serde_json::json!({
+            "mcpServers": {
+                "design-gateway": {
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/design-gateway"],
+                    "description": "Design MCP"
+                }
+            }
+        });
+        std::fs::write(
+            tmp.path().join(".claude.json"),
+            serde_json::to_string_pretty(&claude_config).unwrap(),
+        )
+        .unwrap();
+
+        // Codex config exists but doesn't have design-gateway
+        let codex_dir = tmp.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(codex_dir.join("config.toml"), "model = \"o4\"\n").unwrap();
+
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(tmp.path().join("sm-data")).unwrap();
+
+            // Should succeed: discover from Claude and cross-register to Codex
+            let result = mgr.enable_resource("mcp:design-gateway", CliTarget::Codex, None);
+            assert!(
+                result.is_ok(),
+                "enabling for new CLI should succeed, got: {result:?}"
+            );
+
+            // design-gateway should now appear in Codex's config.toml
+            let content = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+            assert!(
+                content.contains("design-gateway"),
+                "design-gateway should be added to Codex config"
+            );
+            assert!(
+                content.contains("npx"),
+                "command should be preserved in Codex config"
+            );
+
+            // Non-MCP config should be preserved
+            assert!(content.contains("model"), "existing Codex config preserved");
+        });
+    }
+
+    /// When an MCP exists only in Claude's config and the user disables it for Codex,
+    /// the operation should be a no-op (not an error) since there's nothing to remove.
+    #[test]
+    fn disable_mcp_for_codex_when_only_in_claude_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let claude_config = serde_json::json!({
+            "mcpServers": {
+                "design-gateway": { "command": "npx", "args": ["-y", "@mcp/design"] }
+            }
+        });
+        std::fs::write(
+            tmp.path().join(".claude.json"),
+            serde_json::to_string_pretty(&claude_config).unwrap(),
+        )
+        .unwrap();
+
+        // Codex has its own MCPs but not design-gateway
+        let codex_dir = tmp.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join("config.toml"),
+            "[mcp_servers.other]\ntype=\"stdio\"\ncommand=\"other\"\n",
+        )
+        .unwrap();
+
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(tmp.path().join("sm-data")).unwrap();
+
+            // Should not error — just a no-op
+            let result = mgr.disable_resource("mcp:design-gateway", CliTarget::Codex, None);
+            assert!(
+                result.is_ok(),
+                "disabling non-existent MCP for target CLI should be no-op"
+            );
+
+            // Codex config should be unchanged (other MCP still there)
+            let content = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+            assert!(content.contains("other"), "existing Codex MCPs preserved");
+            // No design-gateway was added (it wasn't there to begin with)
+            assert!(
+                !content.contains("design-gateway"),
+                "design-gateway should not appear in Codex config"
             );
         });
     }

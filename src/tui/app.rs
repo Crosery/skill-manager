@@ -10,23 +10,6 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum FilterMode {
-    All,
-    Enabled,
-    Disabled,
-}
-
-impl FilterMode {
-    pub fn next(self) -> Self {
-        match self {
-            FilterMode::All => FilterMode::Enabled,
-            FilterMode::Enabled => FilterMode::Disabled,
-            FilterMode::Disabled => FilterMode::All,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
 pub enum Tab {
     Skills,
     Mcps,
