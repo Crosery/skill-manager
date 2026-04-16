@@ -32,6 +32,17 @@ pub struct ScanResult {
     pub errors: Vec<String>,
 }
 
+/// What happened to a single entry during adoption.
+#[derive(Debug, PartialEq, Eq)]
+enum AdoptOutcome {
+    /// Newly moved into the managed dir and linked back.
+    Adopted,
+    /// Dangling symlink whose name matched an already-managed skill — link redirected.
+    Healed,
+    /// Dangling symlink with no managed counterpart — left alone, counted as skipped.
+    Orphaned,
+}
+
 pub struct Scanner;
 
 impl Scanner {
@@ -313,7 +324,10 @@ impl Scanner {
                 }
                 EntryType::ForeignSymlink | EntryType::RealDir => {
                     match Self::adopt_entry(&entry_path, &name, paths, db, target) {
-                        Ok(_) => result.adopted += 1,
+                        Ok(AdoptOutcome::Adopted | AdoptOutcome::Healed) => {
+                            result.adopted += 1
+                        }
+                        Ok(AdoptOutcome::Orphaned) => result.skipped += 1,
                         Err(e) => result.errors.push(format!("{name}: {e}")),
                     }
                 }
@@ -330,7 +344,7 @@ impl Scanner {
         paths: &AppPaths,
         db: &Database,
         target: CliTarget,
-    ) -> Result<()> {
+    ) -> Result<AdoptOutcome> {
         let managed_dir = paths.skills_dir().join(name);
 
         let actual_source = if Linker::is_symlink(entry_path) {
@@ -348,9 +362,16 @@ impl Scanner {
             entry_path.to_path_buf()
         };
 
-        // 验证源目录存在且有 SKILL.md，否则跳过（断链保护）
+        // 断链保护：源目录不存在时
+        //   - 如果同名 managed skill 已存在（带 SKILL.md），把这条死链重新指向管理目录（自愈）
+        //   - 否则静默跳过：孤儿 symlink 不是我们能处理的，没必要每次 scan 都报错刷屏
         if !actual_source.exists() {
-            anyhow::bail!("source does not exist: {}", actual_source.display());
+            if Linker::is_symlink(entry_path) && managed_dir.join("SKILL.md").exists() {
+                Linker::remove_link(entry_path)?;
+                Linker::create_link(&managed_dir, entry_path)?;
+                return Ok(AdoptOutcome::Healed);
+            }
+            return Ok(AdoptOutcome::Orphaned);
         }
         if !actual_source.join("SKILL.md").exists() && actual_source.is_dir() {
             // 检查是否有子目录包含 SKILL.md（如 cc-switch 的嵌套结构）
@@ -387,7 +408,7 @@ impl Scanner {
         };
 
         db.insert_resource(&resource)?;
-        Ok(())
+        Ok(AdoptOutcome::Adopted)
     }
 
     /// Scan .agents/skills/ — read-only, register in DB but never move files.
@@ -638,6 +659,77 @@ mod tests {
 
         let found = Scanner::discover_skills(root);
         assert!(found.is_empty());
+    }
+
+    /// A dangling symlink in a CLI skills dir whose basename matches an already-managed
+    /// skill should be healed (redirected to the managed copy), not reported as an error.
+    #[test]
+    fn adopt_entry_heals_dangling_symlink_matching_managed_skill() {
+        use crate::core::cli_target::CliTarget;
+        use crate::core::db::Database;
+        use crate::core::paths::AppPaths;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::with_base(tmp.path().join("data"));
+        std::fs::create_dir_all(paths.skills_dir()).unwrap();
+        let db = Database::open(&paths.data_dir().join("runai.db")).unwrap();
+
+        // Managed skill already exists on disk.
+        let name = "wt-sync";
+        let managed = paths.skills_dir().join(name);
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(managed.join("SKILL.md"), "---\nname: wt-sync\n---\n").unwrap();
+
+        // CLI dir has a dangling symlink with the same name.
+        let cli_dir = tmp.path().join("cli").join("skills");
+        std::fs::create_dir_all(&cli_dir).unwrap();
+        let link = cli_dir.join(name);
+        let dead_target = tmp.path().join("ghost/worktree-skill/skills/wt-sync");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&dead_target, &link).unwrap();
+
+        // Sanity: baseline state matches the bug's input.
+        assert!(Linker::is_symlink(&link));
+        assert!(!link.exists(), "target is supposed to be dangling");
+
+        let outcome =
+            Scanner::adopt_entry(&link, name, &paths, &db, CliTarget::Claude).unwrap();
+        assert_eq!(outcome, AdoptOutcome::Healed);
+
+        // After healing, the symlink must resolve to the managed dir.
+        assert!(link.exists(), "symlink should now resolve");
+        let resolved = std::fs::read_link(&link).unwrap();
+        assert_eq!(resolved, managed, "link should point at managed dir");
+    }
+
+    /// A dangling symlink without a matching managed skill is an orphan. It should be
+    /// left alone (not removed) and reported as skipped, not as an error.
+    #[test]
+    fn adopt_entry_skips_dangling_symlink_without_managed_match() {
+        use crate::core::cli_target::CliTarget;
+        use crate::core::db::Database;
+        use crate::core::paths::AppPaths;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::with_base(tmp.path().join("data"));
+        std::fs::create_dir_all(paths.skills_dir()).unwrap();
+        let db = Database::open(&paths.data_dir().join("runai.db")).unwrap();
+
+        let cli_dir = tmp.path().join("cli").join("skills");
+        std::fs::create_dir_all(&cli_dir).unwrap();
+        let link = cli_dir.join("unknown-skill");
+        let dead_target = tmp.path().join("nowhere/unknown-skill");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&dead_target, &link).unwrap();
+
+        let outcome =
+            Scanner::adopt_entry(&link, "unknown-skill", &paths, &db, CliTarget::Claude)
+                .unwrap();
+        assert_eq!(outcome, AdoptOutcome::Orphaned);
+
+        // Orphan untouched: still a dangling symlink, still pointing at the dead target.
+        assert!(Linker::is_symlink(&link));
+        assert_eq!(std::fs::read_link(&link).unwrap(), dead_target);
     }
 
     #[test]
