@@ -95,6 +95,9 @@ pub struct App {
     pub group_pick_idx: usize,
     pub message: Option<String>,
     pub status: (usize, usize, usize, usize),
+    /// Max usage_count across currently-loaded items. Used by the render layer
+    /// to scale per-row heat bars. Recomputed in `reload()`.
+    pub max_usage_count: u64,
     pub first_launch_info: Option<FirstLaunchInfo>,
     pub scan_log: Vec<String>,
     /// Last known mtime of CLI config files for change detection
@@ -162,6 +165,7 @@ impl App {
             group_pick_idx: 0,
             message: None,
             status: (0, 0, 0, 0),
+            max_usage_count: 0,
             first_launch_info: None,
             scan_log: Vec::new(),
             config_mtimes: HashMap::new(),
@@ -344,6 +348,7 @@ impl App {
         let (es, em) = self.mgr.status(self.active_target).unwrap_or((0, 0));
         let (ts, tm) = self.mgr.resource_count();
         self.status = (es, ts, em, tm);
+        self.max_usage_count = self.items.iter().map(|r| r.usage_count).max().unwrap_or(0);
 
         if self.selected >= self.visible_count() && self.visible_count() > 0 {
             self.selected = self.visible_count() - 1;
