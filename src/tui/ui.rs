@@ -109,13 +109,38 @@ fn render_body(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     }
 }
 
+/// A 7-cell heat bar as a `Line`, ready to drop into a `Table` cell.
+/// - `count == 0` → empty bar (7 spaces, preserves column alignment).
+/// - `count > 0`  → `filled = round(count/max * 7)` (min 1); filled cells are `▇`
+///   in the heat palette bucket picked by the same ratio, unfilled cells are spaces.
+fn heat_bar_line(count: u64, max: u64, t: &Theme) -> Line<'static> {
+    if count == 0 || max == 0 {
+        return Line::from("       ");
+    }
+    let ratio = (count as f64 / max as f64).clamp(0.0, 1.0);
+    let filled = (((ratio * 7.0).round()) as usize).clamp(1, 7);
+    // Bucket 0..=4 — nudge so ratio=0.2 lands in bucket 1, not bucket 0.
+    let bucket = ((ratio * 4.999) as usize).min(4);
+    let color = t.heat[bucket];
+    let bar: String = "▇".repeat(filled) + &" ".repeat(7 - filled);
+    Line::from(Span::styled(bar, Style::default().fg(color)))
+}
+
 fn render_resources(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     let i = T::new(app.lang);
     let visible = app.visible_items();
-    let items: Vec<ListItem> = visible
+    let max_usage = app.max_usage_count;
+
+    // Three-column layout:
+    //   Col 0 — marker + kind + name (fixed 40 cols)
+    //   Col 1 — description (fills remaining width; truncated by Table)
+    //   Col 2 — 7-cell heat bar (fixed)
+    // Using a Table (not List) because we need the bar right-aligned and
+    // the description to expand into the remaining width; a List can only
+    // flow left-to-right with space padding that breaks on CJK width.
+    let rows: Vec<Row> = visible
         .iter()
-        .enumerate()
-        .map(|(_, r)| {
+        .map(|r| {
             let enabled = r.is_enabled_for(app.active_target);
             let marker = if enabled { "●" } else { "○" };
             let marker_color = if enabled {
@@ -123,22 +148,13 @@ fn render_resources(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
             } else {
                 t.item_disabled
             };
-
             let kind_color = match r.kind.as_str() {
                 "skill" => t.item_kind,
                 _ => t.item_kind_mcp,
             };
 
-            let desc: String = r.description.chars().take(40).collect();
-
-            let usage_str = if r.usage_count > 0 {
-                format!(" {}x", r.usage_count)
-            } else {
-                String::new()
-            };
-
-            let mut spans = vec![
-                Span::raw("  "),
+            let prefix = Line::from(vec![
+                Span::raw(" "),
                 Span::styled(marker, Style::default().fg(marker_color)),
                 Span::raw("  "),
                 Span::styled(
@@ -146,19 +162,18 @@ fn render_resources(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
                     Style::default().fg(kind_color),
                 ),
                 Span::raw(" "),
-                Span::styled(
-                    format!("{:<28}", r.name),
-                    Style::default().fg(t.item_name).bold(),
-                ),
-                Span::styled(desc, Style::default().fg(t.item_desc)),
-            ];
-            if !usage_str.is_empty() {
-                spans.push(Span::styled(usage_str, Style::default().fg(t.text_dim)));
-            }
+                Span::styled(r.name.clone(), Style::default().fg(t.item_name).bold()),
+            ]);
 
-            let line = Line::from(spans);
+            let desc = Span::styled(r.description.clone(), Style::default().fg(t.item_desc));
 
-            ListItem::new(line)
+            let bar = heat_bar_line(r.usage_count, max_usage, t);
+
+            Row::new(vec![
+                Cell::from(prefix),
+                Cell::from(Line::from(desc)),
+                Cell::from(bar),
+            ])
         })
         .collect();
 
@@ -178,7 +193,12 @@ fn render_resources(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
         String::new()
     };
     let title = format!(" {}{} ({}) ", tab_label, filter_label, visible.len());
-    let list = List::new(items)
+    let widths = [
+        Constraint::Length(40),
+        Constraint::Min(10),
+        Constraint::Length(7),
+    ];
+    let table = Table::new(rows, widths)
         .block(
             Block::default()
                 .title(Span::styled(title, Style::default().fg(t.text).bold()))
@@ -186,11 +206,11 @@ fn render_resources(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(t.border)),
         )
-        .highlight_style(Style::default().bg(t.item_selected_bg));
+        .row_highlight_style(Style::default().bg(t.item_selected_bg));
 
-    let mut state = ListState::default();
+    let mut state = TableState::default();
     state.select(Some(app.selected));
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(table, area, &mut state);
 }
 
 fn render_groups(f: &mut Frame, app: &App, t: &Theme, area: Rect) {

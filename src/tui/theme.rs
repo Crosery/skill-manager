@@ -64,6 +64,10 @@ pub struct Theme {
     // Help keys
     pub help_key: Color,
     pub help_text: Color,
+
+    /// Heat palette for the usage-count bar, 5 buckets cold → hot.
+    /// Index 0 = coldest (1 use / low usage), 4 = hottest (max usage).
+    pub heat: [Color; 5],
 }
 
 impl Theme {
@@ -93,6 +97,13 @@ impl Theme {
             text_highlight: Color::Rgb(56, 164, 252),
             help_key: Color::Rgb(232, 149, 74),
             help_text: Color::DarkGray,
+            heat: [
+                Color::Rgb(70, 100, 120),  // 1 — cool slate
+                Color::Rgb(90, 150, 170),  // 2 — teal
+                Color::Rgb(90, 190, 140),  // 3 — teal-green
+                Color::Rgb(120, 220, 110), // 4 — green
+                Color::Rgb(180, 240, 90),  // 5 — hot lime
+            ],
         }
     }
 
@@ -122,6 +133,13 @@ impl Theme {
             text_highlight: Color::Rgb(30, 110, 200),
             help_key: Color::Rgb(180, 100, 30),
             help_text: Color::Rgb(120, 120, 120),
+            heat: [
+                Color::Rgb(130, 150, 180), // 1 — muted slate
+                Color::Rgb(90, 160, 170),  // 2 — teal
+                Color::Rgb(60, 160, 110),  // 3 — teal-green
+                Color::Rgb(40, 150, 60),   // 4 — green
+                Color::Rgb(30, 130, 20),   // 5 — hot deep green
+            ],
         }
     }
 
