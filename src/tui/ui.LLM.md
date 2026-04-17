@@ -1,0 +1,29 @@
+---
+module: tui::ui
+file: src/tui/ui.rs
+role: tui-render
+---
+
+# tui::ui
+
+## Purpose
+Pure rendering. Takes `&App` + `&mut Frame`, draws the current tab, modal dialogs, footer, search bar. No state mutation, no I/O.
+
+## Public API (internal)
+- `draw(frame, app)` — top-level entry; dispatches to per-tab draw functions.
+- Per-tab: `draw_skills`, `draw_mcps`, `draw_groups`, `draw_market`, (optional) `draw_dazi`.
+- Widgets: `draw_footer`, `draw_help_overlay`, `draw_search_bar`, `draw_install_modal`, etc.
+
+## Key invariants
+- **No mutation**: must not change `app` state. Any condition that feels like "I want to store this in App for next frame" belongs in `tui::app`, computed before render.
+- Each tab fills `frame.size()` minus a shared header/footer — layout uses `ratatui::layout::{Layout, Constraint}` consistently.
+- Colors are always looked up via `tui::theme`, never hardcoded — dark/light theme switch is a one-call operation.
+
+## Touch points
+- **Upstream**: `tui::mod::run_tui` calls `terminal.draw(|f| ui::draw(f, &app))` each tick.
+- **Downstream**: `tui::theme` for styles, `tui::i18n` for every user-visible string, `ratatui` widget library.
+
+## Gotchas
+- Every string displayed to the user should go through `i18n` — hardcoded English strings break Chinese users and vice versa.
+- Long-list rendering uses `ratatui::widgets::List` with `state`; the state (scroll offset, selection) lives in `App`, not here.
+- Help overlay is a modal drawn **last** so it occludes the tab — preserve that draw-order if refactoring.
