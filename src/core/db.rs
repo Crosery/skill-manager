@@ -139,6 +139,75 @@ impl Database {
         Ok(())
     }
 
+    /// Collapse duplicate skill rows that share the same `name`.
+    ///
+    /// Background: a skill can accumulate multiple DB rows over time (e.g.
+    /// installed once via GitHub then re-adopted by `runai scan` after the
+    /// user moved the dir). Two rows with the same name diverge `resource_count()`
+    /// (counts all rows) from `list_resources()` (dedupes by name) — the user
+    /// then sees "280 skills" in the header but only 278 in the list. Worse,
+    /// `status()` overcounts and `enable_resource(id)` may target the wrong row.
+    ///
+    /// Strategy: keep the row with the largest `installed_at`. For losers,
+    /// retarget any `group_members` rows to the keeper id (INSERT OR IGNORE
+    /// to dodge PK conflicts), then delete `resource_targets` and `resources`
+    /// rows for losers. Returns the number of rows removed.
+    pub fn dedupe_skills_by_name(&self) -> Result<usize> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name FROM resources WHERE kind = 'skill' \
+             GROUP BY name HAVING COUNT(*) > 1",
+        )?;
+        let dup_names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+
+        let mut total_removed = 0usize;
+        for name in dup_names {
+            // Pick keeper = max(installed_at), tiebreak by id (stable).
+            let keeper_id: String = self.conn.query_row(
+                "SELECT id FROM resources WHERE kind = 'skill' AND name = ?1 \
+                 ORDER BY installed_at DESC, id ASC LIMIT 1",
+                params![name],
+                |row| row.get(0),
+            )?;
+
+            // Loser ids = same name, not the keeper.
+            let mut id_stmt = self.conn.prepare(
+                "SELECT id FROM resources WHERE kind = 'skill' AND name = ?1 AND id != ?2",
+            )?;
+            let loser_ids: Vec<String> = id_stmt
+                .query_map(params![name, keeper_id], |row| row.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(id_stmt);
+
+            for loser in &loser_ids {
+                // Re-point group_members from loser to keeper. INSERT OR IGNORE
+                // handles the PK collision when the keeper is already in the
+                // same group (we just want the loser row gone).
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO group_members (group_id, resource_id) \
+                     SELECT group_id, ?1 FROM group_members WHERE resource_id = ?2",
+                    params![keeper_id, loser],
+                )?;
+                self.conn.execute(
+                    "DELETE FROM group_members WHERE resource_id = ?1",
+                    params![loser],
+                )?;
+                self.conn.execute(
+                    "DELETE FROM resource_targets WHERE resource_id = ?1",
+                    params![loser],
+                )?;
+                self.conn
+                    .execute("DELETE FROM resources WHERE id = ?1", params![loser])?;
+                total_removed += 1;
+            }
+        }
+        Ok(total_removed)
+    }
+
     pub fn get_resource(&self, id: &str) -> Result<Option<Resource>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, kind, description, directory, source_type, source_meta, installed_at, usage_count, last_used_at

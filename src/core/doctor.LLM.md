@@ -13,9 +13,11 @@ Run a battery of environment checks — `runai doctor` output. Inspects `~/.runa
 - `struct CheckResult { name, status, detail }`, `enum CheckStatus { Pass, Warn, Fail }`.
 - `CheckStatus::icon() -> &str` — `"✓" / "⚠" / "✗"`.
 - `run_doctor() -> Vec<CheckResult>` — runs every check and returns results in display order.
+- `run_doctor_fix() -> FixReport { broken_symlinks_removed, dedupe_rows_removed }` — repair pass triggered by `runai doctor --fix`. Walks `~/.{claude,codex,gemini,opencode}/skills/`, removes symlinks where `path.exists() == false` (target gone), then re-runs `Database::dedupe_skills_by_name()`. The same dedupe also runs silently in `SkillManager::new()/with_base()`, so `--fix` typically reports zero rows removed — it exists as the explicit recovery surface for state that drifted mid-session.
 
 ## Key invariants
-- Doctor **never mutates state**. Read-only by design — users should feel safe running it anytime.
+- `run_doctor` is read-only — users should feel safe running it anytime.
+- `run_doctor_fix` is the ONLY mutating surface in this module; never call it from anywhere except the `--fix` flag handler. The dedupe SQL it triggers is idempotent and bounded; the symlink prune is filesystem-bounded to the four CLI skills dirs (no walk into the user home root).
 - Every `Fail` must include a `detail` string suggesting a specific fix (`"Run 'runai register' to fix"`).
 
 ## Touch points

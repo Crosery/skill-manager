@@ -129,6 +129,11 @@ impl SkillManager {
         let paths = AppPaths::default_path();
         paths.ensure_dirs()?;
         let db = Database::open(&paths.db_path())?;
+        // Silent dedupe at startup: collapse any duplicate skill rows that
+        // accumulated from prior installs/adopts. The header showing
+        // `0/280 skills` while the list shows 278 is exactly this — fix at
+        // load time so the user never sees the divergence again.
+        let _ = db.dedupe_skills_by_name();
         Ok(Self { paths, db })
     }
 
@@ -136,6 +141,7 @@ impl SkillManager {
         let paths = AppPaths::with_base(base);
         paths.ensure_dirs()?;
         let db = Database::open(&paths.db_path())?;
+        let _ = db.dedupe_skills_by_name();
         Ok(Self { paths, db })
     }
 
@@ -223,9 +229,14 @@ impl SkillManager {
                 .unwrap_or_else(|| target.skills_dir());
             std::fs::create_dir_all(&cli_dir)?;
             let link_path = cli_dir.join(&resource.name);
-            if !link_path.exists() {
-                Linker::create_link(&resource.directory, &link_path)?;
-            }
+            // `link_path.exists()` follows symlinks, so a DANGLING symlink
+            // returns false here — making the old `if !exists()` check pass
+            // and then fail with EEXIST inside `create_link`. Use the force
+            // variant so any pre-existing symlink (including dangling) is
+            // unlinked and recreated to point at the right managed dir.
+            // Real directories at the link path are still left alone (force
+            // only clobbers symlinks) — those would surface as a loud error.
+            Linker::create_link_force(&resource.directory, &link_path)?;
             Ok(())
         }
     }
@@ -1023,11 +1034,29 @@ impl SkillManager {
     pub fn status(&self, target: CliTarget) -> Result<(usize, usize)> {
         let mut skill_enabled = 0;
         if let Ok(skills) = self.db.list_resources(Some(ResourceKind::Skill), None) {
+            // Dedupe by name first — same skill may have multiple DB rows from
+            // historical adopts. Without this, a duplicated skill counts twice
+            // toward `enabled` while the list-view (which dedupes via
+            // list_resources) shows it once, and the header/list disagree.
+            let mut seen = std::collections::HashSet::new();
             for skill in &skills {
-                // Check both skills/ and .agents/skills/
+                if !seen.insert(skill.name.clone()) {
+                    continue;
+                }
+                // Check both skills/ and .agents/skills/. Use `symlink_metadata`
+                // (via `Linker::is_symlink`) so DANGLING symlinks still count
+                // as enabled — `path.exists()` follows symlinks and returns
+                // false for those, which is what made the header undercount.
+                // The on-disk symlink IS the source of truth for "enabled";
+                // whether it's currently dangling is a separate concern that
+                // `runai doctor` reports.
                 let primary = target.skills_dir().join(&skill.name);
                 let agents = target.agents_skills_dir().join(&skill.name);
-                if primary.exists() || agents.exists() {
+                if Linker::is_symlink(&primary)
+                    || Linker::is_symlink(&agents)
+                    || primary.exists()
+                    || agents.exists()
+                {
                     skill_enabled += 1;
                 }
             }
@@ -2521,6 +2550,208 @@ args = []
             assert!(
                 !content.contains("design-gateway"),
                 "design-gateway should not appear in Codex config"
+            );
+        });
+    }
+
+    // ── 2026-04-27 incident regression tests ──────────────────────────────
+    // Bugs fixed in this commit:
+    //   3. status() undercounted skills whose ~/.claude/skills/ symlink was
+    //      dangling — `path.exists()` follows symlinks.
+    //   1+2. enable_resource silently failed when a stale (dangling) symlink
+    //      sat at the link path — `fs::symlink` returned EEXIST but the
+    //      caller wrapped it in `if !exists()` so the error never surfaced.
+    //   4. resource_count vs list_resources diverged when DB carried two
+    //      rows with the same skill name from successive adopts.
+    //   5. scanner.adopt_entry would `std::fs::rename` real ~/.runai/skills/
+    //      data into a non-default RUNE_DATA_DIR target (the actual cause of
+    //      the 5 permanently-deleted skills).
+
+    #[test]
+    fn status_counts_dangling_symlink_as_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sm_data = tmp.path().join("sm-data");
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(sm_data.clone()).unwrap();
+            let skill_dir = sm_data.join("skills/my-skill");
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            mgr.db()
+                .insert_resource(&Resource {
+                    id: "local:my-skill".into(),
+                    name: "my-skill".into(),
+                    kind: ResourceKind::Skill,
+                    description: "x".into(),
+                    directory: skill_dir.clone(),
+                    source: Source::Local {
+                        path: skill_dir.clone(),
+                    },
+                    installed_at: 0,
+                    enabled: HashMap::new(),
+                    usage_count: 0,
+                    last_used_at: None,
+                })
+                .unwrap();
+
+            // Create the ~/.claude/skills/my-skill symlink pointing at a
+            // path that does NOT exist (dangling). path.exists() returns
+            // false here; the OLD status() code skipped this skill.
+            let claude_skills = tmp.path().join(".claude/skills");
+            std::fs::create_dir_all(&claude_skills).unwrap();
+            let link = claude_skills.join("my-skill");
+            std::os::unix::fs::symlink(tmp.path().join("nope"), &link).unwrap();
+            assert!(!link.exists(), "link must be dangling");
+
+            let (skill_enabled, _) = mgr.status(CliTarget::Claude).unwrap();
+            assert_eq!(
+                skill_enabled, 1,
+                "dangling symlink IS the source of truth for enabled — status() must count it"
+            );
+        });
+    }
+
+    #[test]
+    fn enable_resource_clobbers_dangling_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sm_data = tmp.path().join("sm-data");
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(sm_data.clone()).unwrap();
+            let skill_dir = sm_data.join("skills/my-skill");
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            mgr.db()
+                .insert_resource(&Resource {
+                    id: "local:my-skill".into(),
+                    name: "my-skill".into(),
+                    kind: ResourceKind::Skill,
+                    description: "x".into(),
+                    directory: skill_dir.clone(),
+                    source: Source::Local {
+                        path: skill_dir.clone(),
+                    },
+                    installed_at: 0,
+                    enabled: HashMap::new(),
+                    usage_count: 0,
+                    last_used_at: None,
+                })
+                .unwrap();
+
+            // Pre-existing dangling symlink at the link path simulates a
+            // prior failed scan / smoke-test pollution.
+            let claude_skills = tmp.path().join(".claude/skills");
+            std::fs::create_dir_all(&claude_skills).unwrap();
+            let link = claude_skills.join("my-skill");
+            std::os::unix::fs::symlink(tmp.path().join("nope"), &link).unwrap();
+
+            mgr.enable_resource("local:my-skill", CliTarget::Claude, None)
+                .expect("enable must succeed even if a dangling symlink already occupies the path");
+
+            // Symlink must now point at the real managed skill dir.
+            let resolved = std::fs::read_link(&link).unwrap();
+            assert_eq!(resolved, skill_dir);
+            assert!(link.exists(), "link must resolve after enable");
+        });
+    }
+
+    #[test]
+    fn dedupe_skills_by_name_keeps_newest_and_redirects_groups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sm_data = tmp.path().join("sm-data");
+        with_home(tmp.path(), || {
+            let mgr = SkillManager::with_base(sm_data.clone()).unwrap();
+
+            let dir = sm_data.join("skills/dup");
+            std::fs::create_dir_all(&dir).unwrap();
+            // Two rows for the same skill name, different ids and installed_at.
+            for (id, ts) in [("local:dup", 100), ("adopted:dup", 200)] {
+                mgr.db()
+                    .insert_resource(&Resource {
+                        id: id.into(),
+                        name: "dup".into(),
+                        kind: ResourceKind::Skill,
+                        description: id.into(),
+                        directory: dir.clone(),
+                        source: Source::Local { path: dir.clone() },
+                        installed_at: ts,
+                        enabled: HashMap::new(),
+                        usage_count: 0,
+                        last_used_at: None,
+                    })
+                    .unwrap();
+            }
+
+            // Put the loser (older row) in a group so we can verify
+            // membership migrates to the keeper.
+            let g = crate::core::group::Group {
+                name: "g".into(),
+                description: "".into(),
+                kind: crate::core::group::GroupKind::Custom,
+                auto_enable: false,
+                members: vec![],
+            };
+            mgr.create_group("g", &g).unwrap();
+            mgr.db().add_group_member("g", "local:dup").unwrap();
+
+            let removed = mgr.db().dedupe_skills_by_name().unwrap();
+            assert_eq!(removed, 1, "exactly the older row must be deleted");
+
+            // Newest row (adopted:dup, ts=200) survived.
+            assert!(mgr.db().get_resource("adopted:dup").unwrap().is_some());
+            assert!(mgr.db().get_resource("local:dup").unwrap().is_none());
+
+            // Group membership migrated to keeper.
+            let members = mgr.db().get_group_members("g").unwrap();
+            assert_eq!(members.len(), 1);
+            assert_eq!(members[0].id, "adopted:dup");
+        });
+    }
+
+    #[test]
+    fn scan_refuses_when_actual_source_in_default_data_dir_but_active_dir_differs() {
+        // This is the 2026-04-27 incident root-cause guard. We can't easily
+        // simulate the full default_data_dir path on a CI temp dir without
+        // also remapping HOME — but we CAN verify the predicate by setting
+        // up the default skill, the foreign symlink, and a custom data dir,
+        // all rooted under a shared HOME.
+        let tmp = tempfile::tempdir().unwrap();
+        with_home(tmp.path(), || {
+            let real_skill = tmp.path().join(".runai/skills/protected");
+            std::fs::create_dir_all(&real_skill).unwrap();
+            std::fs::write(real_skill.join("SKILL.md"), "---\nname: protected\n---\n").unwrap();
+
+            // Foreign symlink: ~/.claude/skills/protected -> ~/.runai/skills/protected
+            let claude_skills = tmp.path().join(".claude/skills");
+            std::fs::create_dir_all(&claude_skills).unwrap();
+            let foreign_link = claude_skills.join("protected");
+            std::os::unix::fs::symlink(&real_skill, &foreign_link).unwrap();
+
+            // Custom data dir != default (~/.runai). This is the dangerous combo.
+            let custom = tmp.path().join("custom-data-dir");
+            let mgr = SkillManager::with_base(custom.clone()).unwrap();
+
+            let result = crate::core::scanner::Scanner::scan_cli_dir(
+                &claude_skills,
+                mgr.paths(),
+                mgr.db(),
+                CliTarget::Claude,
+            )
+            .expect("scan_cli_dir should not itself error — guard surfaces inside ScanResult");
+
+            // The scan should NOT have moved real_skill out of ~/.runai/skills.
+            assert!(
+                real_skill.exists(),
+                "the guard must prevent rename — real ~/.runai data must stay put"
+            );
+            // And the result should report the guard error (not a successful adopt).
+            assert!(
+                !result.errors.is_empty(),
+                "scan_cli_dir must surface the guard's bail as an error: {result:?}"
+            );
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .any(|e: &String| e.contains("default data dir")),
+                "error message must reference the default-data-dir guard: {:?}",
+                result.errors
             );
         });
     }
