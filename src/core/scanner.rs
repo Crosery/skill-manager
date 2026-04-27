@@ -416,7 +416,13 @@ impl Scanner {
                 })
                 .unwrap_or(false);
             if !has_skill {
-                anyhow::bail!("no SKILL.md found in {}", actual_source.display());
+                // Not a skill — could be a bundle container (e.g. codex's
+                // `codex-primary-runtime/{slides,spreadsheets}/SKILL.md`),
+                // metadata dir, or unrelated content. Silently skip rather
+                // than erroring: scanner is supposed to ignore non-skills,
+                // and surfacing this as `errors:` confuses users into
+                // thinking something broke.
+                return Ok(AdoptOutcome::Orphaned);
             }
         }
 

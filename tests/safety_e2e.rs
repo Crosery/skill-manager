@@ -425,3 +425,47 @@ fn doctor_fix_only_prunes_dangling_under_cli_skills_dirs() {
         "doctor --fix touched a path OUTSIDE the isolated HOME"
     );
 }
+
+/// Regression: a directory under `~/.<cli>/skills/` that is not itself a skill
+/// (no SKILL.md at the top level, no SKILL.md in immediate children) must NOT
+/// produce an "error" line in scan output. This used to surface as
+/// `error: <name>: no SKILL.md found in <path>` for codex's bundle dirs like
+/// `codex-primary-runtime/{slides,spreadsheets}/SKILL.md`.
+#[test]
+fn scan_silently_skips_non_skill_directories() {
+    let env = TestEnv::new();
+
+    // Bundle structure: container dir, real skills are nested two levels deep.
+    let bundle = env.cli_skills_dir("codex").join("some-bundle");
+    std::fs::create_dir_all(bundle.join("slides")).unwrap();
+    std::fs::write(
+        bundle.join("slides/SKILL.md"),
+        "---\nname: slides\ndescription: x\n---\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(bundle.join("spreadsheets")).unwrap();
+    std::fs::write(
+        bundle.join("spreadsheets/SKILL.md"),
+        "---\nname: spreadsheets\ndescription: x\n---\n",
+    )
+    .unwrap();
+
+    // An empty subdirectory — no SKILL.md anywhere underneath.
+    std::fs::create_dir_all(env.cli_skills_dir("claude").join("empty-dir")).unwrap();
+
+    let out = env.run(&["scan"]);
+    dump(&out, "scan with non-skill dirs present");
+    assert!(out.status.success(), "scan should succeed");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("no SKILL.md found"),
+        "REGRESSION: scanner errored on non-skill dir. stderr:\n{stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("0 errors"),
+        "REGRESSION: scan reported errors when only non-skill dirs were present.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
