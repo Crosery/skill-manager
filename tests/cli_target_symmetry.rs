@@ -75,7 +75,10 @@ fn round_trip(target: &str, skill_name: &str) {
     let env = TestEnv::new();
     let skill_dir = env.home().join(".runai/skills");
     make_skill(&skill_dir, skill_name);
-    assert!(env.run(&["scan"]).status.success(), "scan failed for {target}");
+    assert!(
+        env.run(&["scan"]).status.success(),
+        "scan failed for {target}"
+    );
 
     let link_path = env.cli_skills_dir(target).join(skill_name);
 
@@ -120,12 +123,16 @@ fn round_trip(target: &str, skill_name: &str) {
     );
 
     // --- re-enable then uninstall (trash-first) ---
-    assert!(env
-        .run(&["enable", skill_name, "--target", target])
-        .status
-        .success());
+    assert!(
+        env.run(&["enable", skill_name, "--target", target])
+            .status
+            .success()
+    );
     let un = env.run(&["uninstall", skill_name]);
-    dump(&un, &format!("uninstall {skill_name} (was enabled on {target})"));
+    dump(
+        &un,
+        &format!("uninstall {skill_name} (was enabled on {target})"),
+    );
     assert!(un.status.success(), "uninstall failed for {target}");
     assert!(
         std::fs::symlink_metadata(&link_path).is_err(),
@@ -173,14 +180,16 @@ fn enable_two_targets_keeps_both_symlinks_independent() {
     make_skill(&skill_dir, "shared");
     assert!(env.run(&["scan"]).status.success());
 
-    assert!(env
-        .run(&["enable", "shared", "--target", "claude"])
-        .status
-        .success());
-    assert!(env
-        .run(&["enable", "shared", "--target", "codex"])
-        .status
-        .success());
+    assert!(
+        env.run(&["enable", "shared", "--target", "claude"])
+            .status
+            .success()
+    );
+    assert!(
+        env.run(&["enable", "shared", "--target", "codex"])
+            .status
+            .success()
+    );
 
     let claude_link = env.cli_skills_dir("claude").join("shared");
     let codex_link = env.cli_skills_dir("codex").join("shared");
@@ -188,10 +197,11 @@ fn enable_two_targets_keeps_both_symlinks_independent() {
     assert!(std::fs::symlink_metadata(&codex_link).is_ok());
 
     // Disable on claude — codex must remain.
-    assert!(env
-        .run(&["disable", "shared", "--target", "claude"])
-        .status
-        .success());
+    assert!(
+        env.run(&["disable", "shared", "--target", "claude"])
+            .status
+            .success()
+    );
     assert!(
         std::fs::symlink_metadata(&claude_link).is_err(),
         "claude link should be gone after disable"

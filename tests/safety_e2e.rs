@@ -118,7 +118,10 @@ fn scan_with_rune_data_dir_does_not_rename_default_skills() {
     let original = std::fs::read(&sentinel_md).unwrap();
 
     // Symlink it into ~/.claude/skills/ so a scan finds something to adopt.
-    symlink(&sentinel_dir, &env.cli_skills_dir("claude").join("sentinel-skill"));
+    symlink(
+        &sentinel_dir,
+        &env.cli_skills_dir("claude").join("sentinel-skill"),
+    );
 
     // Switch to a non-default data dir and run scan. Without the guard, the
     // adopt path would `std::fs::rename` sentinel_dir into other_data/skills/.
@@ -160,7 +163,10 @@ fn scan_does_not_touch_paths_outside_isolated_home() {
     let outside = tempfile::tempdir().unwrap();
     let outside_file = outside.path().join("dont-touch-me.txt");
     std::fs::write(&outside_file, "untouchable\n").unwrap();
-    let mtime_before = std::fs::metadata(&outside_file).unwrap().modified().unwrap();
+    let mtime_before = std::fs::metadata(&outside_file)
+        .unwrap()
+        .modified()
+        .unwrap();
 
     // Place a couple of skills inside HOME so scan has work to do.
     make_skill(&env.default_skills_dir(), "alpha", "alpha desc");
@@ -178,7 +184,10 @@ fn scan_does_not_touch_paths_outside_isolated_home() {
         "untouchable\n",
         "scan wrote to a file outside the isolated HOME"
     );
-    let mtime_after = std::fs::metadata(&outside_file).unwrap().modified().unwrap();
+    let mtime_after = std::fs::metadata(&outside_file)
+        .unwrap()
+        .modified()
+        .unwrap();
     assert_eq!(mtime_before, mtime_after, "scan touched outside-HOME mtime");
 }
 
@@ -267,10 +276,11 @@ fn uninstall_to_trash_then_restore_round_trip() {
     let env = TestEnv::new();
     make_skill(&env.default_skills_dir(), "round-trip", "round-trip desc");
     assert!(env.run(&["scan"]).status.success());
-    assert!(env
-        .run(&["enable", "round-trip", "--target", "claude"])
-        .status
-        .success());
+    assert!(
+        env.run(&["enable", "round-trip", "--target", "claude"])
+            .status
+            .success()
+    );
 
     let original_dir = env.default_skills_dir().join("round-trip");
     assert!(original_dir.join("SKILL.md").exists());
@@ -323,10 +333,11 @@ fn doctor_fix_only_prunes_dangling_under_cli_skills_dirs() {
     // Setup A: a valid enabled skill — must survive --fix.
     make_skill(&env.default_skills_dir(), "valid", "valid desc");
     assert!(env.run(&["scan"]).status.success());
-    assert!(env
-        .run(&["enable", "valid", "--target", "claude"])
-        .status
-        .success());
+    assert!(
+        env.run(&["enable", "valid", "--target", "claude"])
+            .status
+            .success()
+    );
     let valid_link = env.cli_skills_dir("claude").join("valid");
     assert!(std::fs::symlink_metadata(&valid_link).is_ok());
 
@@ -361,7 +372,10 @@ fn doctor_fix_only_prunes_dangling_under_cli_skills_dirs() {
     let outside = tempfile::tempdir().unwrap();
     let outside_file = outside.path().join("untouchable.txt");
     std::fs::write(&outside_file, "untouchable\n").unwrap();
-    let outside_mtime_before = std::fs::metadata(&outside_file).unwrap().modified().unwrap();
+    let outside_mtime_before = std::fs::metadata(&outside_file)
+        .unwrap()
+        .modified()
+        .unwrap();
 
     let out = env.run(&["doctor", "--fix"]);
     dump(&out, "doctor --fix");
@@ -403,7 +417,10 @@ fn doctor_fix_only_prunes_dangling_under_cli_skills_dirs() {
         "untouchable\n"
     );
     assert_eq!(
-        std::fs::metadata(&outside_file).unwrap().modified().unwrap(),
+        std::fs::metadata(&outside_file)
+            .unwrap()
+            .modified()
+            .unwrap(),
         outside_mtime_before,
         "doctor --fix touched a path OUTSIDE the isolated HOME"
     );
