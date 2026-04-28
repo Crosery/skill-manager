@@ -121,7 +121,7 @@ cargo test -- --test-threads=1   # default in CI; SQLite dislikes parallel I/O h
 cargo test --lib <module>        # scope to a module
 ```
 
-**Test count varies by platform**: unix currently runs lib tests + 13 integration tests (7 safety_e2e + 5 cli_target_symmetry + 1 mcp_stdio), plus 1 ignored (`install_test::test_real_install_minimax`, manual network test). Windows skips `manager::tests`, `safety_e2e`, and `cli_target_symmetry` because HOME mocking + symlinks are unix-only — the count is lower there. That's intentional — see Key constraints.
+**Test count varies by platform**: unix currently runs 168 lib tests + 13 integration tests (7 safety_e2e + 5 cli_target_symmetry + 1 mcp_stdio) = 181 active, plus 1 ignored (`install_test::test_real_install_minimax`, manual network test). Windows skips `manager::tests`, `safety_e2e`, and `cli_target_symmetry` because HOME mocking + symlinks are unix-only — the count is lower there. That's intentional — see Key constraints.
 
 ---
 
