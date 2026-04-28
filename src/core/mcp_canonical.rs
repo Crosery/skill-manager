@@ -15,17 +15,25 @@ pub fn is_opencode_shape(entry: &Value) -> bool {
     entry.get("command").map(|v| v.is_array()).unwrap_or(false)
 }
 
-/// True when the entry is unusable: command is missing, empty string,
-/// or an array whose first non-meta element is empty / missing.
-/// Migration uses this to quarantine into `mcps/.corrupt/`.
+/// True when the entry is unusable: command is missing/empty AND no http url.
+///
+/// Note: different CLIs spell HTTP-type entries differently (`type:"http"` /
+/// `"url"` / `"remote"`, or no type at all). Only the presence of a non-empty
+/// `url` field is the reliable signal that this is a remote MCP and a missing
+/// `command` is fine.
 pub fn is_corrupt(entry: &Value) -> bool {
+    // Remote / HTTP MCPs: presence of non-empty url is enough — command is irrelevant.
+    if entry
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    // stdio: must have non-empty command (string or array[0])
     let Some(cmd) = entry.get("command") else {
-        return entry
-            .get("type")
-            .and_then(|v| v.as_str())
-            .map(|t| t != "http")
-            .unwrap_or(true)
-            && entry.get("url").and_then(|v| v.as_str()).is_none();
+        return true;
     };
     if let Some(s) = cmd.as_str() {
         return s.trim().is_empty();
@@ -300,6 +308,26 @@ mod tests {
         assert!(!is_corrupt(
             &json!({ "type": "http", "url": "https://x.com" })
         ));
+    }
+
+    #[test]
+    fn corrupt_allows_remote_entries_with_any_type_value() {
+        // Real-world: Gemini-style remote MCPs use `type:"url"` / `"remote"` (or omit type)
+        assert!(!is_corrupt(
+            &json!({ "type": "url", "url": "http://x.com", "headers": {} })
+        ));
+        assert!(!is_corrupt(
+            &json!({ "type": "remote", "url": "http://x.com" })
+        ));
+        assert!(!is_corrupt(
+            &json!({ "url": "http://x.com", "headers": {} })
+        ));
+    }
+
+    #[test]
+    fn corrupt_flags_no_command_and_no_url() {
+        assert!(is_corrupt(&json!({ "type": "stdio" })));
+        assert!(is_corrupt(&json!({ "url": "" })));
     }
 
     #[test]
