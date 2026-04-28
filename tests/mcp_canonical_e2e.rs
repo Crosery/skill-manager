@@ -179,6 +179,82 @@ fn e2e_opencode_shaped_backup_normalized_at_startup() {
 }
 
 #[test]
+fn e2e_disable_corrupt_entry_does_not_create_backup() {
+    // Reproduces user-reported bug: a CLI config containing a corrupt MCP entry
+    // (empty command, e.g. crosery-search) gets disabled — historically this
+    // wrote the empty-command backup, then enable failed with `is_corrupt`.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+
+    let oc_dir = home.join(".config").join("opencode");
+    std::fs::create_dir_all(&oc_dir).unwrap();
+    std::fs::write(
+        oc_dir.join("opencode.json"),
+        r#"{"mcp":{"crosery-search":{"command":[""],"enabled":true,"type":"local"}}}"#,
+    )
+    .unwrap();
+
+    let (_, _stderr, status) =
+        run_runai(home, &["disable", "crosery-search", "--target", "opencode"]);
+    assert!(
+        status.success(),
+        "disable should succeed even on corrupt entry"
+    );
+
+    // Backup must NOT be created — would block future re-enable
+    let backup = home.join(".runai").join("mcps").join("crosery-search.json");
+    assert!(
+        !backup.exists(),
+        "corrupt entry must not be persisted as backup"
+    );
+
+    // CLI config should still be cleaned (entry removed)
+    let oc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(oc_dir.join("opencode.json")).unwrap())
+            .unwrap();
+    assert!(
+        oc["mcp"].get("crosery-search").is_none(),
+        "corrupt entry removed from CLI config"
+    );
+}
+
+#[test]
+fn e2e_remote_http_backup_with_url_only_is_not_corrupt() {
+    // Reproduces user-reported edge case: dazi-marketplace.json had `type:"url"`
+    // + url + headers and no command. Old is_corrupt only spared `type:"http"`,
+    // wrongly quarantining real remote MCPs.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+
+    let mcps_dir = home.join(".runai").join("mcps");
+    std::fs::create_dir_all(&mcps_dir).unwrap();
+    std::fs::write(
+        mcps_dir.join("dazi-marketplace.json"),
+        r#"{"type":"url","url":"http://dazi.example.com/mcp","headers":{}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        mcps_dir.join("dazi-remote.json"),
+        r#"{"type":"remote","url":"http://dazi.example.com/api/mcp","headers":{}}"#,
+    )
+    .unwrap();
+
+    let (_, _stderr, status) = run_runai(home, &["status"]);
+    assert!(status.success());
+
+    // Both must remain in mcps/, not quarantined
+    assert!(mcps_dir.join("dazi-marketplace.json").exists());
+    assert!(mcps_dir.join("dazi-remote.json").exists());
+    assert!(
+        !mcps_dir
+            .join(".corrupt")
+            .join("dazi-marketplace.json")
+            .exists()
+    );
+    assert!(!mcps_dir.join(".corrupt").join("dazi-remote.json").exists());
+}
+
+#[test]
 fn e2e_codex_disable_enable_preserves_tools_and_env_subtables() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path();

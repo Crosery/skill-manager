@@ -384,11 +384,20 @@ impl SkillManager {
     }
 
     /// Disable MCP: save config to backup, remove entry from CLI config file.
+    /// Corrupt entries (empty command, no url) are removed from the CLI but NOT
+    /// persisted as backup — re-enabling a corrupt entry would just fail at the
+    /// `is_corrupt` write guard. The user is told to re-register manually.
     fn remove_mcp(&self, mcp_name: &str, target: CliTarget) -> Result<()> {
         if let Some(entry) = self.remove_mcp_entry_from_target(mcp_name, target)? {
-            self.write_mcp_backup(mcp_name, &entry)?;
+            if is_corrupt(&entry) {
+                eprintln!(
+                    "[runai] removed corrupt MCP entry '{mcp_name}' from {} — no backup created (re-register the MCP via your CLI to recover)",
+                    target.name()
+                );
+            } else {
+                self.write_mcp_backup(mcp_name, &entry)?;
+            }
         }
-
         Ok(())
     }
 
