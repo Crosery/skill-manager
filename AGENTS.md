@@ -26,7 +26,7 @@
 - **Language/runtime**: Rust 2024 edition, single static binary, no runtime dependencies.
 - **Top-level crates/modules** under `src/`:
   - `cli/` — clap subcommand dispatch. Every user-facing subcommand lives here.
-  - `core/` — business logic. 19 files, see Module index. `manager.rs` is the orchestration hub.
+  - `core/` — business logic. 20 files, see Module index. `manager.rs` is the orchestration hub.
   - `mcp/` — rmcp-based MCP server exposing tool calls to host CLIs (stdio transport).
   - `tui/` — ratatui + crossterm full-screen UI. `app.rs` is the state machine; `ui.rs` renders.
 - **Data layout**: `~/.runai/` holds `skills/`, `mcps/`, `groups/`, `trash/`, `backups/`, `market-cache/`, `runai.db` (SQLite via rusqlite bundled). On Windows: `%APPDATA%\runai\` (via `dirs::data_dir`).
@@ -54,6 +54,7 @@ File-level LLM docs follow the convention `<name>.LLM.md` as a sibling to the so
 | core::channel | [src/core/channel.rs](src/core/channel.rs) | [src/core/channel.LLM.md](src/core/channel.LLM.md) | Release channel (stable / beta) selection |
 | core::classifier | [src/core/classifier.rs](src/core/classifier.rs) | [src/core/classifier.LLM.md](src/core/classifier.LLM.md) | Classifies installable artifacts into Skill vs MCP vs Agent |
 | core::cli_target | [src/core/cli_target.rs](src/core/cli_target.rs) | [src/core/cli_target.LLM.md](src/core/cli_target.LLM.md) | CliTarget enum + per-target dir/config resolvers |
+| core::config_watcher | [src/core/config_watcher.rs](src/core/config_watcher.rs) | [src/core/config_watcher.LLM.md](src/core/config_watcher.LLM.md) | notify-based watcher for 4 CLI MCP configs + skills dirs + mcps backup; drives TUI live reload |
 | core::db | [src/core/db.rs](src/core/db.rs) | [src/core/db.LLM.md](src/core/db.LLM.md) | SQLite schema + migrations + query layer |
 | core::doctor | [src/core/doctor.rs](src/core/doctor.rs) | [src/core/doctor.LLM.md](src/core/doctor.LLM.md) | `runai doctor` health checks |
 | core::group | [src/core/group.rs](src/core/group.rs) | [src/core/group.LLM.md](src/core/group.LLM.md) | Group definition (TOML on disk) + member type |
@@ -118,7 +119,7 @@ cargo test -- --test-threads=1   # default in CI; SQLite dislikes parallel I/O h
 cargo test --lib <module>        # scope to a module
 ```
 
-**Test count varies by platform**: unix currently runs 158 tests; Windows still skips `manager::tests` because HOME mocking is unix-only, so the count is lower there. That's intentional — see Key constraints.
+**Test count varies by platform**: unix currently runs 164 lib tests + 1 integration test (mcp_stdio) = 165 active, plus 1 ignored (`install_test::test_real_install_minimax`, manual network test). Windows skips `manager::tests` because HOME mocking is unix-only — the count is lower there. That's intentional — see Key constraints.
 
 ---
 
