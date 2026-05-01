@@ -1,6 +1,6 @@
 [package]
 name = "runai"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 description = "AI CLI resource manager for skills and MCP servers"
 authors = ["Crosery"]
@@ -40,6 +40,9 @@ tar = "0.4"
 zip = "2"
 tempfile = "3"
 semver = "1"
+# Filesystem event watcher (TUI live reload)
+notify = "8"
+notify-debouncer-mini = "0.6"
 
 [profile.release]
 strip = true

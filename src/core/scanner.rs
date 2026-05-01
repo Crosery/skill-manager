@@ -361,6 +361,40 @@ impl Scanner {
             entry_path.to_path_buf()
         };
 
+        // ── Cross-data-dir safety guard ───────────────────────────────────────
+        // 2026-04-27 incident root cause: developer ran
+        //   RUNE_DATA_DIR=/tmp/x runai scan
+        // — adopt then `std::fs::rename`d real skill data out of the user's
+        // default ~/.runai/skills/ into /tmp/x/skills/, after which
+        // `rm -rf /tmp/x` permanently deleted 5 skills.
+        //
+        // Trigger condition: actual_source resolves into the DEFAULT data
+        // dir's skills/ subtree, BUT the active data dir points somewhere
+        // else. Bail loudly rather than rename real data away.
+        //
+        // CRITICAL: must use `default_data_dir_no_env()` not `data_dir()` —
+        // `data_dir()` reads RUNE_DATA_DIR itself, so in the dangerous case
+        // it returns the override and the comparison degenerates to "always
+        // equal". Verified by physical e2e test: the original implementation
+        // using `data_dir()` silently let the rename through.
+        let default_skills = crate::core::paths::default_data_dir_no_env().join("skills");
+        let active_data = paths.data_dir().to_path_buf();
+        if actual_source.starts_with(&default_skills)
+            && active_data != crate::core::paths::default_data_dir_no_env()
+        {
+            anyhow::bail!(
+                "refused to adopt '{}': source path {} is inside the default \
+                 data dir, but the active data dir is {} — adopting would \
+                 std::fs::rename real user data out of the default location. \
+                 If you really want to test scan in isolation, also set HOME \
+                 to a tempdir so the scanner sees no real user skills.\n\
+                 See ~/.claude/vault/50-playbook/symlink-safety.md",
+                name,
+                actual_source.display(),
+                active_data.display(),
+            );
+        }
+
         // 断链保护：源目录不存在时
         //   - 如果同名 managed skill 已存在（带 SKILL.md），把这条死链重新指向管理目录（自愈）
         //   - 否则静默跳过：孤儿 symlink 不是我们能处理的，没必要每次 scan 都报错刷屏
@@ -382,7 +416,13 @@ impl Scanner {
                 })
                 .unwrap_or(false);
             if !has_skill {
-                anyhow::bail!("no SKILL.md found in {}", actual_source.display());
+                // Not a skill — could be a bundle container (e.g. codex's
+                // `codex-primary-runtime/{slides,spreadsheets}/SKILL.md`),
+                // metadata dir, or unrelated content. Silently skip rather
+                // than erroring: scanner is supposed to ignore non-skills,
+                // and surfacing this as `errors:` confuses users into
+                // thinking something broke.
+                return Ok(AdoptOutcome::Orphaned);
             }
         }
 

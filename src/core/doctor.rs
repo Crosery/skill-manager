@@ -75,6 +75,70 @@ pub fn run_doctor() -> Vec<CheckResult> {
     results
 }
 
+/// Repair operations triggered by `runai doctor --fix`.
+/// Currently:
+///   - Removes broken symlinks under `~/.{claude,codex,gemini,opencode}/skills/`
+///     whose target no longer exists. Skill enabled-state lives in the
+///     filesystem, so a dangling symlink is nothing but a stale "this used
+///     to be enabled" marker — pruning it brings reality and the TUI's
+///     enabled count back into sync.
+///   - The DB-side dedupe already runs silently in `SkillManager::new()` /
+///     `with_base()`, so this returns the count for reporting only.
+pub struct FixReport {
+    pub broken_symlinks_removed: Vec<String>,
+    pub dedupe_rows_removed: usize,
+}
+
+pub fn run_doctor_fix() -> FixReport {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let cli_skill_dirs = [
+        home.join(".claude/skills"),
+        home.join(".codex/skills"),
+        home.join(".gemini/skills"),
+        home.join(".opencode/skills"),
+        home.join(".config/opencode/skills"),
+    ];
+    let mut removed = Vec::new();
+    for dir in &cli_skill_dirs {
+        if !dir.exists() {
+            continue;
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_symlink() {
+                continue;
+            }
+            // `path.exists()` follows the symlink — false means dangling.
+            if !path.exists()
+                && let Ok(()) = std::fs::remove_file(&path)
+            {
+                removed.push(path.display().to_string());
+            }
+        }
+    }
+
+    // Run a fresh dedupe pass and report the count. Manager's startup pass
+    // already ran one, so this typically reports 0 — but if a duplicate
+    // appeared mid-session it gets caught here.
+    let data_dir = crate::core::paths::data_dir();
+    let dedupe_rows_removed = match rusqlite::Connection::open(data_dir.join("runai.db")) {
+        Ok(_) => match crate::core::db::Database::open(&data_dir.join("runai.db")) {
+            Ok(db) => db.dedupe_skills_by_name().unwrap_or(0),
+            Err(_) => 0,
+        },
+        Err(_) => 0,
+    };
+
+    FixReport {
+        broken_symlinks_removed: removed,
+        dedupe_rows_removed,
+    }
+}
+
 /// Check if current binary is valid and executable.
 fn check_binary() -> CheckResult {
     match std::env::current_exe() {

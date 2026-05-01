@@ -32,3 +32,4 @@ clap-based CLI entry point. Parses subcommands, constructs a `SkillManager`, dis
 - When adding a new subcommand: update `Commands` enum, add match arm in `run`, document in `AGENTS.md` if user-facing.
 - `find_resource_id_by_name` returns `"resource not found"` error — match the exact message if adding tests.
 - The `--target` arg defaults to `claude`. Explicit target required for non-Claude CLIs.
+- `Doctor { fix: bool }` — when `--fix`, calls `core::doctor::run_doctor_fix()`: prunes dangling symlinks under `~/.{claude,codex,gemini,opencode}/skills/` and reruns the skill-row dedupe. The same dedupe runs silently inside `SkillManager::new()/with_base()` so most of the time `--fix` reports zero — it's the explicit recovery surface for users whose state drifted mid-session.

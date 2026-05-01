@@ -19,6 +19,7 @@ Two jobs. (1) **Discover** — recursively walk a directory finding `SKILL.md`, 
 ## Key invariants
 - **Never auto-runs on startup.** User must invoke `scan` / `discover` explicitly — avoids clobbering existing symlinks.
 - Orphan broken symlinks (no matching managed skill) are **left intact**, counted as skipped. Only broken symlinks whose basename matches a managed skill get healed (relinked to the managed dir).
+- **Non-skill directories silently skipped, not errored.** A dir under `~/.<cli>/skills/` that has no `SKILL.md` at the top level AND no `SKILL.md` in immediate children (e.g. codex's bundle container `codex-primary-runtime/{slides,spreadsheets}/SKILL.md`) returns `AdoptOutcome::Orphaned` and counts as `skipped`, not `errors`. Surfacing as `error:` in scan output confused users into thinking something broke.
 - `NOISE_PATHS` compared against `path_str.replace('\\', '/')` — do **not** regress to raw `to_string_lossy()`, breaks on Windows.
 - `walk_for_skills` depth cap = 8 levels, prevents runaway recursion.
 

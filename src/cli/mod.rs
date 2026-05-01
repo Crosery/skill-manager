@@ -94,7 +94,13 @@ pub enum Commands {
     /// Update runai to the latest version
     Update,
     /// Run health checks on runai installation
-    Doctor,
+    Doctor {
+        /// Repair what can be repaired automatically: prune dangling
+        /// `~/.{claude,codex,gemini,opencode}/skills/` symlinks and re-run
+        /// the skill-row dedupe pass.
+        #[arg(long)]
+        fix: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -430,7 +436,7 @@ pub fn run(cli: Cli) -> Result<()> {
             //    suppression. Skipping straight to exit sidesteps both.
             std::process::exit(0);
         }
-        Some(Commands::Doctor) => {
+        Some(Commands::Doctor { fix }) => {
             println!("runai doctor v{}\n", env!("CARGO_PKG_VERSION"));
             let results = crate::core::doctor::run_doctor();
             let mut has_fail = false;
@@ -442,6 +448,22 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             }
             println!();
+            if fix {
+                let report = crate::core::doctor::run_doctor_fix();
+                println!("--- repair ---");
+                println!(
+                    "  pruned {} broken symlinks",
+                    report.broken_symlinks_removed.len()
+                );
+                for s in &report.broken_symlinks_removed {
+                    println!("    {s}");
+                }
+                println!(
+                    "  removed {} duplicate skill DB rows",
+                    report.dedupe_rows_removed
+                );
+                println!();
+            }
             if has_fail {
                 println!("Some checks failed. Run 'runai register' to fix MCP registration.");
             } else {

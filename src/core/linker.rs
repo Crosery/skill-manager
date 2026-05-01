@@ -42,6 +42,22 @@ impl Linker {
         Ok(())
     }
 
+    /// Like `create_link` but if `link` already exists as a symlink (including a
+    /// dangling one), unlink it first and recreate. Used by `enable_resource`
+    /// to recover from prior failed scan / smoke-test states where a stale
+    /// symlink at the target path would otherwise cause the underlying
+    /// `fs::symlink` syscall to fail with EEXIST.
+    ///
+    /// We only clobber symlinks — never real directories — so a hand-crafted
+    /// real dir at the link path is still left alone (the bare `fs::symlink`
+    /// call below will then fail loudly, which is the right behavior).
+    pub fn create_link_force(target: &Path, link: &Path) -> Result<()> {
+        if Self::is_symlink(link) {
+            Self::remove_link(link)?;
+        }
+        Self::create_link(target, link)
+    }
+
     pub fn remove_link(link: &Path) -> Result<()> {
         if Self::is_symlink(link) {
             #[cfg(unix)]
@@ -135,5 +151,55 @@ impl Linker {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_link_force_overwrites_dangling_symlink() {
+        // Regression for bug 4 from 2026-04-27 incident — `enable_resource`
+        // was hitting EEXIST because a stale symlink from a prior session
+        // already occupied the link path. `create_link_force` must clobber.
+        let tmp = tempfile::tempdir().unwrap();
+        let real_target = tmp.path().join("real-target");
+        std::fs::create_dir_all(&real_target).unwrap();
+        let stale_target = tmp.path().join("does-not-exist");
+        let link = tmp.path().join("the-link");
+
+        // Pre-existing dangling symlink — `link.exists()` returns false here.
+        std::os::unix::fs::symlink(&stale_target, &link).unwrap();
+        assert!(Linker::is_symlink(&link));
+        assert!(!link.exists(), "link must be dangling for this test");
+
+        Linker::create_link_force(&real_target, &link).unwrap();
+
+        assert!(Linker::is_symlink(&link));
+        let resolved = std::fs::read_link(&link).unwrap();
+        assert_eq!(
+            resolved, real_target,
+            "link must be repointed to real target"
+        );
+        assert!(link.exists(), "link must now resolve");
+    }
+
+    #[test]
+    fn create_link_without_force_fails_on_existing_symlink() {
+        // Confirms why we needed create_link_force in the first place: the
+        // bare create_link call wraps fs::symlink, which fails with EEXIST
+        // even when the existing entry is a dangling symlink.
+        let tmp = tempfile::tempdir().unwrap();
+        let real_target = tmp.path().join("real-target");
+        std::fs::create_dir_all(&real_target).unwrap();
+        let link = tmp.path().join("the-link");
+        std::os::unix::fs::symlink(tmp.path().join("nope"), &link).unwrap();
+
+        let err = Linker::create_link(&real_target, &link).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink") || err.to_string().to_lowercase().contains("exist"),
+            "expected symlink/exists error, got: {err}"
+        );
     }
 }
