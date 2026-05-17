@@ -310,7 +310,36 @@ pub fn recommend(
     let bm25_pure = std::env::var("RUNAI_BM25_PURE").is_ok();
     let bm25_as_signal = std::env::var("RUNAI_BM25_AS_SIGNAL").is_ok();
     let bm25_hybrid = !bm25_pure && !bm25_as_signal && !bm25_disabled;
-    let q_terms = bm25::tokenize(user_prompt);
+
+    // Query expansion (opt-in): rewrite short prompts via the LLM into a
+    // BM25-friendly keyword list before prefilter. Off by default —
+    // empirically in hybrid mode (`bm25 * 0.4 + llm_score/10 * 0.6`) the
+    // LLM-score weight dominates and reshuffling BM25 doesn't change the
+    // top-30; the rewrite call just adds ~400ms with no chosen-set change.
+    // Worth enabling only with `RUNAI_QUERY_REWRITE_ENABLE=1`, typically
+    // paired with `RUNAI_BM25_PURE=1` to give BM25 score more weight.
+    // Failure falls back to the original prompt.
+    let rewrite_enabled = std::env::var("RUNAI_QUERY_REWRITE_ENABLE").is_ok();
+    let expanded_query = if !rewrite_enabled || user_prompt.chars().count() > 50 {
+        None
+    } else {
+        let api_key_for_rewrite = if cfg.provider == Provider::ClaudeCli {
+            String::new()
+        } else {
+            cfg.effective_api_key().unwrap_or_default()
+        };
+        if cfg.provider == Provider::ClaudeCli || !api_key_for_rewrite.is_empty() {
+            rewrite_query_for_bm25(&cfg, &api_key_for_rewrite, user_prompt)
+        } else {
+            None
+        }
+    };
+    let bm25_input_query: String = match &expanded_query {
+        Some(expanded) => format!("{user_prompt} {expanded}"),
+        None => user_prompt.to_string(),
+    };
+
+    let q_terms = bm25::tokenize(&bm25_input_query);
     let mut bm25_fallback_reason: &'static str = "";
 
     let summaries = mgr.db().skill_ai_summary_all().unwrap_or_default();
@@ -1154,6 +1183,45 @@ fn call_summary_llm(cfg: &RecommendConfig, api_key: &str, user_msg: &str) -> Res
         Provider::ClaudeCli => call_claude_cli(cfg, user_msg)?,
     };
     Ok(raw)
+}
+
+/// Expand a short / ambiguous user prompt into a BM25-friendly keyword
+/// string for the prefilter. The LLM is asked to pull out the user's real
+/// intent and pad the query with synonyms, jargon, en/zh cross-fills, and
+/// verb/noun variants. Output is a single comma-separated line, no prose.
+/// Returns `None` on any error (network, parse, empty) — caller falls back
+/// to the raw user prompt; nothing depends on rewrite succeeding.
+fn rewrite_query_for_bm25(
+    cfg: &RecommendConfig,
+    api_key: &str,
+    user_prompt: &str,
+) -> Option<String> {
+    let prompt = format!(
+        "你是 BM25 检索查询扩展器。\n\n\
+        任务：把下面的 user prompt 扩展成一行 BM25 检索友好的关键词列表。\n\
+        - 提取用户的真实意图（不要逐字复述 prompt）\n\
+        - 加同义词、行话、动词名词变体、缩写\n\
+        - 中文 prompt 加英文同义词；英文 prompt 加中文等价词\n\
+        - 至少 10 个关键词，多多益善\n\
+        - **输出格式**：单行，逗号分隔的关键词，不要任何解释 / 标题 / 前后缀 / 引号\n\
+        - 不要写句子，只写关键词\n\n\
+        反例（不要这样写）：\n\
+        - 'I think the user wants ...' （别解释）\n\
+        - 'Keywords: a, b, c' （别写前缀）\n\
+        - 多行输出\n\n\
+        user prompt: {user_prompt}\n\n\
+        输出（单行关键词）："
+    );
+    let raw = call_summary_llm(cfg, api_key, &prompt).ok()?;
+    // Take only the first non-empty line; LLM sometimes adds a trailing
+    // explanation despite the instructions.
+    let line = raw.lines().find(|l| !l.trim().is_empty())?.trim();
+    if line.is_empty() {
+        return None;
+    }
+    // Sanity cap to bound the prefilter input.
+    let capped: String = line.chars().take(800).collect();
+    Some(capped)
 }
 
 /// Write the most-recent router decision to `<data_dir>/last-recommend.json`.

@@ -588,10 +588,12 @@ impl Database {
         let llm_raw_capped: String = ev.llm_raw_response.chars().take(2000).collect();
         let hook_out_capped: String = ev.hook_output.chars().take(6000).collect();
         // llm_input is the full user-message string the router sent to the
-        // LLM. Bigger cap (16 KB) since it includes history + candidate
-        // listing + project context block and is the most diagnostic field
-        // for "why did the model pick X" investigations.
-        let llm_input_capped: String = ev.llm_input.chars().take(16000).collect();
+        // LLM — keep the cap generous (64 KB) so the dashboard's "router LLM
+        // 实际收到的完整输入" panel shows the entire prompt including all
+        // candidate listings + project context. 16 KB was clipping past
+        // candidate ~20 of 30, making users think the LLM saw a truncated
+        // candidate set (it didn't — only the DB copy was clipped).
+        let llm_input_capped: String = ev.llm_input.chars().take(65536).collect();
         self.conn.execute(
             "INSERT INTO router_events (
                 ts, provider, model,
