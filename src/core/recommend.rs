@@ -16,10 +16,15 @@ use crate::core::resource::ResourceKind;
 /// includes too much noise so LLM picks tangential skills. Override with
 /// `RUNAI_BM25_TOP_K=N` env var.
 const BM25_TOP_K: usize = 30;
-/// If the user prompt tokenizes to fewer than this many terms (e.g. "ok"),
-/// skip BM25 and pass the full candidate set — BM25 on a single token would
-/// pick a near-random top-K and exclude unrelated-but-relevant skills.
-const BM25_MIN_QUERY_TERMS: usize = 2;
+/// If the user prompt tokenizes to fewer than this many terms, skip BM25 and
+/// pass the full candidate set. With the default `bm25_hybrid` mode this is
+/// only triggered for **empty** queries — hybrid scoring is
+/// `bm25 * 0.4 + llm_score/10 * 0.6`, so even single-token prompts where BM25
+/// degenerates to "any doc containing that token" still produce a sensible
+/// top-30 sorted by `llm_score`, far better than dumping all 327 candidates
+/// and paying 10× tokens. Empirical: `push` / `/init` used to land at 68-70 KB
+/// prompt_tokens; with this set to 1 they sit at ~7 KB like normal queries.
+const BM25_MIN_QUERY_TERMS: usize = 1;
 /// Minimum positive-score BM25 hits to trust the prefilter. Below this the
 /// query likely has zero / near-zero term overlap with the skill corpus —
 /// the most common cause is cross-language search (CJK prompt against an
