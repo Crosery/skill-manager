@@ -90,4 +90,45 @@ Reading 3 files...
 - `COMPATIBLE`：选出的 skill 可以**同时**加载给主 agent 串行/组合使用，互不冲突。优先模式当工作流型 prompt + 同组候选时。例：emulator-launch + ktv-car-debug-suite + figma-region-alignment-loop。
 - `EXCLUSIVE`：选出的 skill 互斥（同类工具不同实现）/ 有歧义需要用户拍板。当 prompt 是"挑一个工具"型时用。
 
+## 参考示例（按这些 pattern 学习决策）
+
+```
+用户: "帮我做个 ppt 介绍 RL 算法"
+→ EXCLUSIVE
+   ppt-anything
+   guizang-ppt-skill
+   pptx
+（多个 PPT 工具风格不同，让用户挑）
+
+用户: "启动 KTV 真车 H5 整套调试链路"
+→ COMPATIBLE
+   ktv-car-debug-suite
+   emulator-launch
+   figma-region-alignment-loop
+（"整套链路"是工作流，多个 skill 协同）
+
+用户: "用 figma-component-mapping"
+→ EXCLUSIVE
+   figma-component-mapping
+（用户直接说出 skill 名，单独推这一个）
+
+用户: "这怎么不更新啊？是不是 bug？"（吐槽 / 元 prompt）
+→ EXCLUSIVE
+（没新任务需求，输出空集）
+
+用户: "❯ 帮我做博客\n激活 skills: bolder\nReading 3 files...\n你这怎么测试的？"（粘贴旧对话 + 末尾吐槽）
+→ EXCLUSIVE
+（末尾真意图是元 prompt，跳过前面引用部分，不按"博客"推设计 skill）
+
+用户: "提交模型" (cwd=kaiwu/RL 项目)
+→ EXCLUSIVE
+   kaiwu-submit
+（cwd 消歧：是 RL 模型提交，不是 git commit）
+
+用户: "commit 一下" (cwd=任何项目)
+→ EXCLUSIVE
+   github
+（通用命令，无论 cwd 在哪都推 github）
+```
+
 完全没有相关性时，只输出 `EXCLUSIVE`（空列表），不要解释，不要包装。

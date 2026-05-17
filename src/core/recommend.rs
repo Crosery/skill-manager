@@ -1667,8 +1667,12 @@ fn call_anthropic(
 /// references are resolved one level deep (no recursion through referenced
 /// files' own `@` references — keeps prompt size bounded and avoids cycles).
 fn read_project_context(cwd: &Path) -> String {
-    const PER_FILE_LIMIT: usize = 2500;
-    const MAX_REFERENCED_FILES: usize = 5;
+    // Router only needs project identity (RL project? Rust CLI? frontend?) +
+    // domain-specific commands hint (kaiwu submit / runai install). Even
+    // shorter context is enough for disambiguation. Smaller cap → less
+    // attention dilution on the actual user prompt + 30 candidate listings.
+    const PER_FILE_LIMIT: usize = 800;
+    const MAX_REFERENCED_FILES: usize = 2;
 
     let claude_path = cwd.join("CLAUDE.md");
     let claude_raw = match fs::read_to_string(&claude_path) {

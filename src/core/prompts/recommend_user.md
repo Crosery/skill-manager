@@ -1,8 +1,19 @@
+## 用户当前 prompt (最高优先级，必须先看这段判断意图)
+
+```
+{USER_PROMPT}
+```
+
 {CWD_BLOCK}{PROJECT_CONTEXT_BLOCK}{HISTORY_BLOCK}{ALREADY_ROUTED_BLOCK}候选 skill:
 {CANDIDATE_LISTING}
 
-用户当前 prompt:
+---
+
+回到用户当前 prompt 做最终判断：
+
+```
 {USER_PROMPT}
+```
 
 输出格式（严格）：
 第一行：`COMPATIBLE` 或 `EXCLUSIVE`
