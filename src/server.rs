@@ -132,8 +132,26 @@ pub async fn serve(host: &str, port: u16) -> Result<()> {
     Ok(())
 }
 
+/// Process-lifetime cache-buster. Generated once when the server boots from
+/// the current unix timestamp; injected into every `<link href="...">` /
+/// `<script src="...">` URL in `index.html`. Every `runai server` restart
+/// produces a fresh value, so the browser sees a different URL for the CSS
+/// and JS and is forced to fetch the new bytes — no Cmd+Shift+R needed even
+/// the first time after upgrade.
+static BUILD_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+fn build_id() -> &'static str {
+    BUILD_ID.get_or_init(|| chrono::Utc::now().timestamp().to_string())
+}
+
 async fn serve_index() -> Response {
-    static_response(INDEX_HTML, "text/html; charset=utf-8")
+    // Rewrite static asset URLs to include the per-boot build_id query
+    // string so cached entries from a prior server boot can never satisfy
+    // a request for this boot's assets.
+    let bid = build_id();
+    let patched = INDEX_HTML
+        .replace("\"/app.css\"", &format!("\"/app.css?v={bid}\""))
+        .replace("\"/app.js\"", &format!("\"/app.js?v={bid}\""));
+    dynamic_response(patched, "text/html; charset=utf-8")
 }
 async fn serve_app_js() -> Response {
     static_response(APP_JS, "application/javascript; charset=utf-8")
@@ -143,17 +161,29 @@ async fn serve_app_css() -> Response {
 }
 
 fn static_response(body: &'static str, content_type: &'static str) -> Response {
-    // `no-store` + must-revalidate: dashboard's HTML / CSS / JS is bundled
-    // into the binary via `include_str!`, so the only way assets change is
-    // when the binary is rebuilt. Telling the browser never to cache means
-    // a `runai server` restart with a new binary takes effect immediately
-    // (without users needing Cmd+Shift+R to bust their cache).
+    // `no-store` + must-revalidate: assets are bundled into the binary via
+    // `include_str!` so the only way they change is when the binary is
+    // rebuilt. Cache-Control = no-store stops the browser from reading its
+    // disk cache without revalidating; the cache-busting query string in
+    // `serve_index` is the belt-and-braces defense that handles browsers
+    // that ignored a no-store directive on prior responses.
     (
         [
             (header::CONTENT_TYPE, content_type),
             (header::CACHE_CONTROL, "no-store, must-revalidate"),
         ],
         body.to_string(),
+    )
+        .into_response()
+}
+
+fn dynamic_response(body: String, content_type: &'static str) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-store, must-revalidate"),
+        ],
+        body,
     )
         .into_response()
 }
