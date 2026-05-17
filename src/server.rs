@@ -143,7 +143,19 @@ async fn serve_app_css() -> Response {
 }
 
 fn static_response(body: &'static str, content_type: &'static str) -> Response {
-    ([(header::CONTENT_TYPE, content_type)], body.to_string()).into_response()
+    // `no-store` + must-revalidate: dashboard's HTML / CSS / JS is bundled
+    // into the binary via `include_str!`, so the only way assets change is
+    // when the binary is rebuilt. Telling the browser never to cache means
+    // a `runai server` restart with a new binary takes effect immediately
+    // (without users needing Cmd+Shift+R to bust their cache).
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-store, must-revalidate"),
+        ],
+        body.to_string(),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
