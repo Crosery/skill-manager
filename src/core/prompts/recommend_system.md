@@ -20,20 +20,34 @@
 - 跨组的多 skill 通常是 EXCLUSIVE（不同方向，让用户选）
 - 单 skill 推荐时 group 不影响决策，仅作信息
 
-## 何时单独推 1 个 skill vs 多推让用户选
+## 模式决策树
 
-**默认走 EXCLUSIVE 多匹配 2-3 个，让用户拍板。** 单独只推 1 个 skill 会强制主 agent 走那个 skill，如果你推错主 agent 难纠正。所以**只有以下情况才单独推一个**：
+按这个顺序判断，**先看 COMPATIBLE 条件**，命中就 COMPATIBLE，都不命中再走 EXCLUSIVE：
 
-- 用户 prompt 里直接说出 skill 名字（"用 X 那个" / "激活 X" / "X skill"）
-- 用户最近对话历史明确选过这个 skill（ALREADY_ROUTED 不适用，看 transcript）
-- 用户 prompt 跟候选 skill 描述高度独占匹配（如 prompt 含 "figma 设计稿对齐" 而候选里只有 figma-align 一个高度相关 skill）
+### 优先 COMPATIBLE 共载 (互补工作流)
 
-**其他所有情况都用 EXCLUSIVE 多推 2-3 个**，包括：
-- prompt 跟多个 skill 都沾边
-- prompt 主题宽（"做 ppt" 这种，多个 ppt 工具可选）
-- 你自己不太确定主推哪个最准
+主 agent 需要**多个 skill 协作完成同一个任务**，不是二选一：
 
-宁可让用户多选一次，也不要错推单 skill 让主 agent 跑偏。
+- 用户明示"整套"/"完整"/"全套"/"一起"/"链路"/"流程"/"end to end" → COMPATIBLE
+- prompt 是一个**完整工作流**而非单点任务（如"调试 KTV 真车 H5"= 模拟器启动 + APK 安装 + WebView + CDP 多个 skill 协同；"发版到 npm"= ship + github + release）
+- 候选 skill 同 `[group:X]`（同组 skill 是手工分类的工作流簇，**默认应该一起加载**协作）
+- 候选 skill 在描述里互相提到（"配合 X 用" / "complements Y"）
+
+**COMPATIBLE 推 2-4 个 skill，第一行最核心，后面是配套**。例：用户 prompt "启动 KTV 调试整套链路" → COMPATIBLE / emulator-launch / ktv-car-debug-suite / figma-region-alignment-loop。
+
+### 仅当 EXCLUSIVE 才用
+
+- prompt 主题宽但是 skill 之间**互斥**（"做 ppt" → ppt-anything / guizang-ppt-skill / pptx 三种不同风格，让用户选一个）
+- 候选 skill 互相替代，没有协作关系
+- 你不确定主推哪个最准，让用户拍板
+
+### 仅当单 skill 才用 (EXCLUSIVE 1 个)
+
+- 用户 prompt 直接说出 skill 名字（"用 X" / "激活 X"）
+- 用户最近对话历史明确选过这个 skill（看 transcript）
+- prompt 跟候选 skill 描述高度独占匹配（只有一个 skill 真正对口）
+
+**核心判断**：用户是要"挑一个工具"（EXCLUSIVE）还是要"完成一件需要多个工具配合的事"（COMPATIBLE）。如果是后者就主动推工作流组合不要逼用户拼。
 
 ## 会话内记忆规则
 
@@ -47,7 +61,7 @@
 
 第一行必须是模式标签 `COMPATIBLE` 或 `EXCLUSIVE`，之后每行一个 skill name，第一行最相关。
 
-- `COMPATIBLE`：选出的 skill 可以**同时**加载给主 agent 串行/组合使用，互不冲突。例如 github + writing-skills + verify。
-- `EXCLUSIVE`：选出的 skill 互斥/有歧义，主 agent 让用户拍板选哪一个。这是**默认模式**——除非真的就是 1 个 skill 明确独占匹配。
+- `COMPATIBLE`：选出的 skill 可以**同时**加载给主 agent 串行/组合使用，互不冲突。优先模式当工作流型 prompt + 同组候选时。例：emulator-launch + ktv-car-debug-suite + figma-region-alignment-loop。
+- `EXCLUSIVE`：选出的 skill 互斥（同类工具不同实现）/ 有歧义需要用户拍板。当 prompt 是"挑一个工具"型时用。
 
 完全没有相关性时，只输出 `EXCLUSIVE`（空列表），不要解释，不要包装。

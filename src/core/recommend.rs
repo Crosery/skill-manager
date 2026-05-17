@@ -1356,7 +1356,9 @@ pub fn format_for_hook_full(
             .map(|s| format!("- **{}** — {}", s.name, s.description))
             .collect::<Vec<_>>()
             .join("\n");
-        HOOK_MULTI_TEMPLATE.replace("{CANDIDATES}", &candidates)
+        HOOK_MULTI_TEMPLATE
+            .replace("{CANDIDATES}", &candidates)
+            .replace("{SESSION_ID}", session_id)
     };
 
     // Append session-history reminder + feedback protocol.
@@ -2414,9 +2416,12 @@ mod tests {
             content: String::new(),
         };
         let out = format_for_hook(&decision(RouterMode::Exclusive, vec![a, b]));
-        assert!(out.contains("Multiple skills"));
+        // hook_multi.md was rewritten in zh; assert structural markers still
+        // present: candidate list bullets, no SKILL.md inline, agent told to
+        // run `runai recommend get` after user picks.
         assert!(out.contains("- **figma-alignment**"));
         assert!(out.contains("- **figma-component-mapping**"));
+        assert!(out.contains("runai recommend get"));
         assert!(!out.contains("should NOT appear"));
         assert!(!out.contains("/x/figma/SKILL.md"));
         assert!(!out.contains("/x/map/SKILL.md"));
