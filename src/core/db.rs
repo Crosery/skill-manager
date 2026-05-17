@@ -657,6 +657,42 @@ impl Database {
         Ok(seen.into_iter().collect())
     }
 
+    /// Every distinct skill name the router has *recommended* (not necessarily
+    /// adopted) in this session, newest-first. Distinct from
+    /// `router_session_routed_skills` which is the adoption set: a skill the
+    /// router proposed but the agent didn't Read still shows up here. Used
+    /// by the hook output to remind the main agent which skills it already
+    /// saw this session — encourages dedup without strictly suppressing
+    /// re-recommendation.
+    pub fn router_session_recommended_skills(&self, session_id: &str) -> Result<Vec<String>> {
+        if session_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT chosen_skills_json FROM router_events
+             WHERE session_id = ?1 AND status = 'ok'
+             ORDER BY ts DESC
+             LIMIT 50",
+        )?;
+        let rows = stmt.query_map(params![session_id], |r| {
+            let s: String = r.get(0)?;
+            Ok(s)
+        })?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut order: Vec<String> = Vec::new();
+        for row in rows {
+            let json = row?;
+            if let Ok(arr) = serde_json::from_str::<Vec<String>>(&json) {
+                for name in arr {
+                    if seen.insert(name.clone()) {
+                        order.push(name);
+                    }
+                }
+            }
+        }
+        Ok(order)
+    }
+
     /// Record that a skill was adopted (Read + acted on by the main agent)
     /// in a given Claude Code session. Called by `runai recommend used`.
     /// Idempotent: PRIMARY KEY (session_id, skill_name) collapses repeated

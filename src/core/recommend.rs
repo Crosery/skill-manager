@@ -253,10 +253,19 @@ pub fn recommend(
         }
     }
 
+    // `already_routed` is the dedup signal handed to the router LLM. It is
+    // the **full** recommendation history this session (every skill the
+    // router has proposed), not just adoptions. Rationale: even if the
+    // main agent declined to Read a skill, it has already seen the name in
+    // a previous hook output, and re-recommending unrelated-but-same-name
+    // skills (e.g. ppt-anything → guizang-ppt-skill → pptx three turns in
+    // a row) is the most obvious "the router doesn't remember" failure
+    // mode users notice. The recommend_system prompt tells the LLM to skip
+    // these unless the user explicitly asks to revisit one ("再用一次 X").
     let already_routed = match session_id {
         Some(sid) if !sid.is_empty() => mgr
             .db()
-            .router_session_routed_skills(sid)
+            .router_session_recommended_skills(sid)
             .unwrap_or_default(),
         _ => Vec::new(),
     };
@@ -435,8 +444,12 @@ pub fn recommend(
             if r.usage_count > 0 {
                 tags.push_str(&format!(" [used:{}]", r.usage_count));
             }
+            // `llm` tag = LLM-side enrich pass quality score (0-10). User
+            // ratings are no longer part of the pipeline; the tag is named
+            // explicitly `llm:N` rather than generic `score:N` to make this
+            // obvious to the router LLM (and to humans inspecting the prompt).
             if let Some(s) = combined_score(&r.name) {
-                tags.push_str(&format!(" [score:{}]", s));
+                tags.push_str(&format!(" [llm:{}]", s));
             }
             if emit_bm25_tag {
                 let b = bm25_scores.get(&r.name).copied().unwrap_or(0.0);
@@ -548,9 +561,19 @@ pub fn recommend(
             } else {
                 String::new()
             };
+            // Prefer the AI-generated summary (bilingual, structured
+            // task/triggers/inputs/outputs/not-for, 6 lines) over the raw
+            // crowdsourced description: it's higher signal density and was
+            // written specifically to help the router LLM + main agent
+            // recognise when the skill applies. Falls back to the
+            // description for skills that haven't been enriched yet.
+            let desc_for_agent = match summaries.get(&r.name) {
+                Some(s) if !s.is_empty() => s.clone(),
+                _ => r.description.clone(),
+            };
             out.push(RecommendedSkill {
                 name: r.name.clone(),
-                description: r.description.clone(),
+                description: desc_for_agent,
                 path: skill_md,
                 content,
             });
@@ -558,7 +581,17 @@ pub fn recommend(
     }
     let decision = RouterDecision { mode, skills: out };
     let hook_output = if status == "ok" {
-        format_for_hook_with_session(&decision, session_id.unwrap_or(""))
+        // Pull this session's previous recommendations so the hook output
+        // can remind the main agent which skills it already saw — cuts
+        // down on repeat recommendations of skills already in context.
+        let history = match session_id {
+            Some(sid) if !sid.is_empty() => mgr
+                .db()
+                .router_session_recommended_skills(sid)
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        format_for_hook_full(&decision, session_id.unwrap_or(""), &history)
     } else {
         String::new()
     };
@@ -1215,6 +1248,20 @@ pub fn format_for_hook(decision: &RouterDecision) -> String {
 /// placeholder which the agent will just leave un-set — adoption then
 /// bumps usage_count without per-session dedup.
 pub fn format_for_hook_with_session(decision: &RouterDecision, session_id: &str) -> String {
+    format_for_hook_full(decision, session_id, &[])
+}
+
+/// Full-control variant: same as `format_for_hook_with_session` but also
+/// renders a "this session already saw these skills" reminder at the end so
+/// the main agent doesn't re-discuss skills it already considered. The
+/// list comes from `router_session_recommended_skills(sid)` and contains
+/// every skill the router has proposed in this session, newest-first,
+/// excluding the ones in the current decision (those are obviously fresh).
+pub fn format_for_hook_full(
+    decision: &RouterDecision,
+    session_id: &str,
+    session_history: &[String],
+) -> String {
     let skills = &decision.skills;
     if skills.is_empty() {
         return String::new();
@@ -1244,15 +1291,32 @@ pub fn format_for_hook_with_session(decision: &RouterDecision, session_id: &str)
         HOOK_MULTI_TEMPLATE.replace("{CANDIDATES}", &candidates)
     };
 
-    // Append the feedback protocol — only fires when the user explicitly
-    // praises or rejects the recommendation, not on every turn.
+    // Append session-history reminder + feedback protocol.
     let names = skills
         .iter()
         .map(|s| s.name.as_str())
         .collect::<Vec<_>>()
         .join(" | ");
+    // Filter out skills currently being recommended — they're obviously
+    // already on the agent's screen, no point re-listing them as history.
+    let current: std::collections::HashSet<&str> =
+        skills.iter().map(|s| s.name.as_str()).collect();
+    let history_filtered: Vec<&str> = session_history
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|n| !current.contains(n))
+        .take(10)
+        .collect();
+    let history_line = if history_filtered.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n本 session 之前 runai 已经推过这些 skill（已在你上下文中，可参考但通常不需要再 Read）: {}",
+            history_filtered.join(", ")
+        )
+    };
     let footer = format!(
-        "\n\n---\n\
+        "\n\n---{history_line}\n\n\
         **反馈协议（被动触发）**: 只有当用户**明确**评价这次推荐时才执行下面的命令，**不要主动每轮都调用**。\n\
         - 用户表达负面（\"不对\"/\"换一个\"/\"不好用\"/\"再试别的\"）→ 在你回复末尾跑：\n\
           `runai recommend feedback <skill-name> --note \"<复述用户原话或场景描述>\"`\n\
@@ -1798,27 +1862,55 @@ pub enum HookInstallStatus {
 }
 
 const HOOK_COMMAND: &str = "runai recommend";
+const POST_TOOL_HOOK_COMMAND: &str = "runai recommend post-tool";
 
-/// Install the UserPromptSubmit hook into `<home>/.claude/settings.json`.
-/// Idempotent: re-running when our hook is already present is a no-op.
-/// Other existing hooks (user's own or other tools) are preserved verbatim.
+/// Install the UserPromptSubmit hook + a PostToolUse hook (matcher: Read)
+/// into `<home>/.claude/settings.json`. The UserPromptSubmit hook is the
+/// router — pulls a recommendation for each user prompt. The PostToolUse
+/// hook is the verification + bookkeeping side: after every Read of a
+/// managed SKILL.md, runai bumps usage_count and records the adoption so
+/// the same skill stops getting re-recommended within the session.
+/// Idempotent; re-running when our hooks are already present is a no-op.
 /// A `.runai-bak` snapshot of the previous settings.json is written next to it.
 pub fn install_claude_hook(home: &Path) -> Result<HookInstallStatus> {
     let claude_dir = home.join(".claude");
     let path = claude_dir.join("settings.json");
     let mut value = read_settings_json(&path)?;
-    let ups_arr = ensure_user_prompt_submit_array(&mut value)?;
 
-    if hook_already_present(ups_arr) {
-        return Ok(HookInstallStatus::AlreadyPresent);
+    let ups_arr = ensure_user_prompt_submit_array(&mut value)?;
+    let ups_already = hook_already_present(ups_arr);
+    if !ups_already {
+        ups_arr.push(serde_json::json!({
+            "hooks": [
+                {"type": "command", "command": HOOK_COMMAND}
+            ]
+        }));
     }
 
-    ups_arr.push(serde_json::json!({
-        "hooks": [
-            {"type": "command", "command": HOOK_COMMAND}
-        ]
-    }));
+    // PostToolUse — match Read so we don't fire on every tool call.
+    let pt_arr = ensure_named_hook_array(&mut value, "PostToolUse")?;
+    let pt_already = pt_arr.iter().any(|group| {
+        group
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(POST_TOOL_HOOK_COMMAND))
+            })
+            .unwrap_or(false)
+    });
+    if !pt_already {
+        pt_arr.push(serde_json::json!({
+            "matcher": "Read",
+            "hooks": [
+                {"type": "command", "command": POST_TOOL_HOOK_COMMAND}
+            ]
+        }));
+    }
 
+    if ups_already && pt_already {
+        return Ok(HookInstallStatus::AlreadyPresent);
+    }
     write_settings_json(&path, &value)?;
     Ok(HookInstallStatus::Installed)
 }
@@ -2189,10 +2281,12 @@ mod tests {
     }
 
     #[test]
-    fn format_single_match_never_inlines_skill_md_body() {
-        // Single-skill recommendations now always emit pointer + description,
-        // regardless of skill size, so the main agent decides whether to
-        // Read the SKILL.md. This test asserts the no-inline contract.
+    fn format_single_match_emits_get_command_not_raw_path() {
+        // Single-skill output deliberately hides the absolute SKILL.md path
+        // and forces the main agent to fetch via `runai recommend get
+        // <name>`. The path appearing in hook output would let the agent
+        // Read it directly, bypassing the atomic usage_count + adoption
+        // bookkeeping the get command does.
         let body = "this skill content body should never appear in the hook output";
         let s = RecommendedSkill {
             name: "figma-alignment".into(),
@@ -2206,8 +2300,12 @@ mod tests {
             "pointer-only output must stay short, got {}",
             out.len()
         );
-        assert!(out.contains("激活 skill: {NAME}") || out.contains("figma-alignment"));
-        assert!(out.contains("/x/SKILL.md"));
+        assert!(out.contains("figma-alignment"));
+        assert!(out.contains("runai recommend get figma-alignment"));
+        assert!(
+            !out.contains("/x/SKILL.md"),
+            "absolute path must not leak in single-skill output (forces agent through `recommend get`)"
+        );
         assert!(
             !out.contains(body),
             "SKILL.md body must never be inlined in single-skill mode"
@@ -2215,7 +2313,7 @@ mod tests {
     }
 
     #[test]
-    fn format_single_match_large_points_at_path_no_inline() {
+    fn format_single_match_large_does_not_inline_content() {
         let huge = "x".repeat(9000);
         let s = RecommendedSkill {
             name: "huge-skill".into(),
@@ -2229,7 +2327,7 @@ mod tests {
             "pointer-only output must stay short, got {}",
             out.len()
         );
-        assert!(out.contains("/x/huge/SKILL.md"));
+        assert!(out.contains("runai recommend get huge-skill"));
         assert!(!out.contains(&huge), "large content must not be inlined");
     }
 
