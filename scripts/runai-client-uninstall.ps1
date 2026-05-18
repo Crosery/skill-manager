@@ -73,7 +73,8 @@ if (Test-Path $SettingsPath) {
             }
             $word = if ($removed -eq 1) { 'entry' } else { 'entries' }
             Write-Host "removed $removed runai hook $word from settings.json"
-            $data | ConvertTo-Json -Depth 20 | Set-Content -Path $SettingsPath -Encoding utf8
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($SettingsPath, ($data | ConvertTo-Json -Depth 20), $utf8NoBom)
         } else {
             Write-Host "no runai UserPromptSubmit hook present"
         }
