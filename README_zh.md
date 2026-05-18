@@ -1,217 +1,198 @@
-# Runai
+<div align="center">
 
-[English](README.md) | **中文**
+<img src="docs/images/runai-hero.png" alt="runai" width="100%" />
 
-<p align="center">
-  <img src="docs/images/runai-logo.png" alt="runai logo" width="180">
+# runai
+
+### 一个终端原生的 AI CLI skill 路由器
+
+<p>跨 Claude Code / Codex / Gemini CLI / OpenCode 的统一 skill / MCP 管理 + LLM 智能路由器 + 实时遥测仪表盘。</p>
+
+<p>
+  <a href="README.md"><b>English</b></a>
+  &nbsp;|&nbsp;
+  <a href="README_zh.md"><b>中文</b></a>
 </p>
 
-**runai** — 一把管理 AI CLI skills 和 MCP servers 的瑞士军刀。
+<p>
+  <a href="#快速开始"><b>快速开始</b></a>
+  &nbsp;·&nbsp;
+  <a href="#三大支柱"><b>三大支柱</b></a>
+  &nbsp;·&nbsp;
+  <a href="#架构一览"><b>架构一览</b></a>
+  &nbsp;·&nbsp;
+  <a href="AGENTS.md"><b>AGENT 指南</b></a>
+</p>
 
-skills 和 MCP servers 散落在 Claude Code / Codex / Gemini CLI / OpenCode 的各自配置里，格式不一、装多了就乱。runai 给你一个 TUI（外加可脚本化的 CLI 和一个 MCP server）一次搞定浏览、启用、搜索、安装、备份，跨 4 个 CLI、**macOS / Linux / Windows** 三平台。
+<sub>单一 Rust 二进制 · macOS / Linux / Windows · 无运行时依赖 · MIT</sub>
 
-- 一条命令从 GitHub 把任意 skill 装到所有 CLI
-- 内置市场 2000+ skill 一键安装
-- 文件系统即真源：symlink 在 = 启用，不在 = 禁用
-- 跨 Claude JSON / Codex TOML / Gemini JSON / OpenCode JSON 原生格式同步
-- macOS / Linux / Windows 原生二进制；Windows 上 symlink 需开启开发者模式
+</div>
 
-## 功能特性
+---
 
-- **TUI 终端界面** — 浏览、启用/禁用、搜索 skills 和 MCPs
-- **多 CLI 支持** — 跨 4 个 AI CLI 统一管理，`1234` 切换目标
-- **分组管理** — 将 skills/MCPs 组织成组，批量启用/禁用，重命名
-- **一键安装** — `runai install owner/repo` 自动下载、注册、分组、启用
-- **市场安装** — 浏览 2000+ skills，TUI Market 标签页 Enter 直接安装
-- **垃圾桶与恢复** — 删除先进入全局垃圾桶，可恢复，也可彻底删除
-- **Skill 发现** — 内置递归扫描器，秒级发现磁盘上所有 SKILL.md
-- **统一搜索** — `sm_search` 同时搜索已安装资源和市场
-- **使用追踪** — 记录 skill 使用次数和最后使用时间，识别未使用的 skill
-- **MCP 服务器** — 21 个工具通过 MCP 协议暴露，首次启动自动注册到所有 CLI
-- **批量操作** — 批量启用/禁用/删除/安装，一次调用完成
-- **多 CLI 配置** — 原生支持：Claude JSON、Codex TOML、OpenCode 自定义 JSON、Gemini JSON
-- **深色/亮色主题** — 按 `t` 切换，适配两种终端背景
-- **文件系统为唯一数据源** — skill 启用 = 软链接存在；MCP 启用 = 配置条目存在
-- **备份与恢复** — 带时间戳的完整备份，包括 skill 文件、MCP 配置和 CLI 配置
-- **自动迁移** — 从 `skill-manager` 无缝升级到 `runai`（数据目录、数据库、软链接、MCP 条目）
-- **命令行** — 子命令支持脚本自动化
+<div align="center">
 
-## 安装
+## 架构一览
 
-```bash
-git clone https://github.com/Crosery/runai.git
-cd runai
-cargo install --path .
-```
+<img src="docs/images/runai-architecture.png" alt="runai architecture" width="60%" />
 
-### Windows
+</div>
 
-预编译二进制：从 [releases](https://github.com/Crosery/runai/releases) 下载 `runai-windows-amd64.zip`，把 `runai.exe` 加入 PATH。也可以 `cargo install --path .` 从源码构建。
+---
 
-**软链接前置条件**：runai 用文件系统软链接作为"skill 启用"的真源。Windows 上创建软链接需要满足以下之一：
+## 一句话
 
-- 启用**开发者模式**（设置 → 隐私和安全 → 开发者 → 开发人员模式），或
-- 以**管理员身份**运行 shell
+`runai` 把"如何在四个 AI CLI 上安装、启用、推荐、观测 skill"这件事统一了。Skill 是磁盘上真实的目录，通过 symlink 关联到每个 CLI 的 skills 目录；MCP server 是每个 CLI 配置文件里的真实条目。**文件系统 = 真值，DB 只存元数据**。
 
-否则 `enable` / `install` 在创建软链接时会失败。推荐开开发者模式（不用每次提权）。
+在这套核心之上：
 
-四个 CLI 的配置文件路径与 unix 一致（`%USERPROFILE%\.claude.json`、`.codex\config.toml`、`.gemini\settings.json`、`.config\opencode\opencode.json`）—— 已核对各 CLI 源码确认。
+- **LLM skill router** 选 (opt-in)：每条 user prompt 自动选最合适的 skill 注入主 agent 上下文（BM25 prefilter + LLM rerank + 真采用计数）
+- **本地 dashboard** 在 `http://127.0.0.1:17888`：每次 hook 触发、token 成本、延迟、被选 skill、完整 LLM 输入 都实时记录
+
+---
+
+## 解决的痛点
+
+| 你以前的痛点 | runai 怎么解 |
+|---|---|
+| Skill 散落在 Claude Code / Codex / Gemini / OpenCode，每个 CLI 配置都有自己的坑 | 一个 TUI + CLI + MCP server 管全四个；每个 target 写原生格式 |
+| `git clone` skill repo、手动拷文件夹、改 JSON / TOML、四个 CLI 重复一遍 | `runai install owner/repo` —— 一键下载 + 入库 + 分组 + symlink 到所有 CLI |
+| 2000+ skill 散在 GitHub，没办法在终端里浏览 | 内置 market：`runai market` 浏览本地缓存索引，Enter 直接装 |
+| 删了的 skill 想恢复回不来 | Trash-first：`runai uninstall` 进 `~/.runai/trash/`，`runai trash restore` 拉回来 |
+| "我到底启用了哪些 skill？" —— `ls` 四个目录、对比配置文件、祈祷它们一致 | 真值 = symlink 存在 + 配置条目存在；`runai status` 实时读文件系统 |
+| 不知道自己实际用了哪些 skill，不知道 router 每轮在干嘛 | Dashboard 在 127.0.0.1:17888 —— 每次 router 调用都记下被选 skill / BM25 命中 / 完整 LLM 输入 / hook 输出 / 延迟 / token |
+
+---
+
+## 三大支柱
+
+### 1. 多 CLI skill / MCP 管理器
+
+- **一次安装，全 CLI 启用** —— `runai install owner/repo[@branch]` 下载 skill、入 DB、symlink 进四个 CLI 的 skills 目录。MCP 条目按每个 CLI 的原生格式写（Claude JSON / Codex TOML / Gemini JSON / OpenCode JSON）。
+- **文件系统 = 真值** —— Skill 启用 ⇔ `<cli-home>/skills/<name>` 存在 symlink。MCP 启用 ⇔ 目标 config 里有条目（无 `"disabled": true`）。DB 只是元数据；删了 DB 也不会坏事。
+- **分组** —— 把相关 skill（`figma` / `ktv-car-project` / `ppt-slides` …）聚成命名组；按组批量启用 / 禁用 / 重命名。
+- **Market** —— 内置 2000+ skill 市场，本地缓存，后台 1h TTL 刷新。`runai market install <name>` 一键装。
+- **安全删除** —— 全部 trash-first，`runai trash purge` 才真删。
+
+### 2. LLM skill router（opt-in）
+
+- **Hook 集成** —— Claude Code 的 `UserPromptSubmit` hook → `runai recommend` → router 决策 → 输出作为额外 context 注入主 agent 的 prompt。
+- **BM25 prefilter + LLM rerank** —— 双语（latin + CJK）BM25 在 AI 生成的 summary 上跑，top 30 candidate 喂给 router LLM（默认 DeepSeek v4-flash；也支持任意 OpenAI 兼容 / Anthropic / `claude-cli` 后端）。混合分 = `BM25 × 0.4 + LLM 质量 × 0.6`。
+- **AI summary 富集** —— 每个 skill 都由同一个 LLM 生成结构化双语 summary（`task / triggers / inputs / outputs / not-for / score`），既当 BM25 索引文本也当 router 候选上下文。SKILL.md 编辑后自动 refresh，`runai install` / `scan` 也会针对改动的 skill 单点 re-enrich。
+- **两种模式** —— `EXCLUSIVE` 让主 agent 在候选里挑；`COMPATIBLE` 一次加载多个互补 skill 适合工作流型 prompt（"整套调试链路" / "完整发版流程"）。同 session 去重，已采用的 skill 不再被重推。
+- **真采用计数** —— 主 agent 真的 `Read` 了 `<skills_dir>/<X>/SKILL.md` 时，`PostToolUse` hook 自动 bump `usage_count` 并写 session adoption 行。Self-report (`runai recommend used`) 是兜底。**信号来源是 Claude Code 自己的工具调用日志，不是 agent 自己说**。
+- **`runai recommend get <skill>`** —— 原子激活：stdout = SKILL.md 全文，副作用 = usage_count +1 + session adoption。hook 输出给这条命令而不是原始路径，调用即采用。
+
+### 3. 实时遥测仪表盘
+
+- **单一 binary 无 CDN** —— `runai server` 启动嵌入的 axum HTTP server；`web/{index.html,app.css,app.js}` 通过 `include_str!` 编译进 Rust 二进制。
+- **每个 Claude Code 会话自动拉起** —— `runai server --install-hook` 加 `SessionStart` hook，让 dashboard 永远在 `http://127.0.0.1:17888`。
+- **每次 router 调用都有埋点** —— 每条事件：model + provider，mode (compat / excl)，候选数，BM25 kept，prompt / completion / total tokens，延迟，被选 skill，状态，错误，完整 user prompt，工作目录，完整 LLM 输入字符串（64 KB cap），完整 hook 输出。
+- **Skill 详情下钻** —— `/skills` 列出每个 skill 的使用次数、LLM 质量分、AI summary；点进去看完整目录树（浏览 SKILL.md + 配套文件）、最近使用历史、原始 description vs 富集后的 summary。
+- **实时刷新** —— 5 秒轮询 + `inFlight` 防并发 + `visibilitychange` 切后台自动暂停。静态资源每次 boot 加 `?v=<时间戳>` cache buster，`cargo install` 升级 binary 后浏览器普通 reload 就拿新版，不用 hard refresh。
+
+---
 
 ## 快速开始
 
+### 安装
+
 ```bash
-# 启动 TUI（首次运行会自动扫描、注册 MCP，并从 skill-manager 迁移）
+cargo install --git https://github.com/Crosery/runai
+# 或者下载预编译二进制
+curl -fsSL https://github.com/Crosery/runai/releases/latest/download/runai-darwin-arm64.tar.gz \
+  | tar xz && mv runai ~/.cargo/bin/
+```
+
+预编译的 `{linux,darwin,windows} × {amd64,arm64}` 在 [releases 页](https://github.com/Crosery/runai/releases)。
+Windows 上 symlink 需要开发者模式或管理员权限。
+
+### 首次配置
+
+```bash
+# 1) 启动 TUI 浏览 / 启用已有 skill + 2000+ market skill
 runai
 
-# 从 GitHub 安装 skills（自动下载、注册、分组、启用）
-runai install pbakaus/impeccable
-runai install MiniMax-AI/skills
+# 2) 开启 LLM router (默认 DeepSeek v4-flash，约 $0.0001 / 次)
+runai recommend setup
+runai recommend install-hook          # 把 UserPromptSubmit + PostToolUse + SessionStart hook
+                                       # 写进 ~/.claude/settings.json（幂等，留 .runai-bak 备份）
 
-# 从市场安装
-runai market-install github
-
-# 查看使用统计
-runai usage --top 10
-
-# 发现磁盘上所有 skill
-runai discover
-
-# CLI 管理
-runai list                    # 列出所有 skills 和 MCPs
-runai status                  # 查看启用数量
-runai enable brainstorming    # 启用某个 skill
-runai uninstall brainstorming # 将资源移入垃圾桶
-runai trash list              # 查看垃圾桶
-runai trash restore brainstorming
-runai scan                    # 扫描已知目录
-runai backup                  # 创建备份
-runai backups                 # 列出已有备份
-runai search figma            # 同时搜索已装资源和市场
-runai market --search figma   # 浏览市场 skill，可选 --source 过滤
-runai group delete my-group   # 删除一个 group 定义（不动成员）
-runai group update my-group --name "新名字" --description "..."
+# 3) 启动一次 dashboard，之后 hook 会自动拉起
+runai server --port 17888 --ensure
+runai server --install-hook            # 每个 Claude Code session 自动拉起
 ```
 
-## Skill 自动路由（默认关闭）
+第 2 步装完，每条 Claude Code prompt 都走 `runai recommend`，每次 SKILL.md `Read` 都记账，每条事件都进 dashboard。
 
-通过 Claude Code 的 `UserPromptSubmit` hook，让小模型按用户每次的 prompt 从已装 skill 中选最相关的几个，把它们的完整 `SKILL.md` 注入主 Claude 上下文。无需手敲 skill 名。
-
-默认关闭。开启：
+### 日常命令
 
 ```bash
-runai recommend setup          # 交互：选 provider、粘 API key、选 model
-runai recommend hook-snippet   # 打印要塞到 ~/.claude/settings.json 的 hook JSON
-runai recommend status         # 查看当前配置（API key 脱敏）
+runai                                 # TUI
+runai install owner/repo              # 从 GitHub 安装 skill 到所有 CLI
+runai market install <name>           # 从 market 安装
+runai search <query>                  # 搜已安装 + market
+runai status                          # 看所有 CLI 的启用 / 禁用状态
+runai list --target claude            # 单 CLI 视图
+runai backup                          # 带时间戳备份 skill + 配置
+runai trash                           # 浏览已删，restore 或 purge
+runai recommend enrich                # 重生 AI summary（mtime 检测增量）
+runai recommend stats                 # router LLM 用量 / 成本 / 延迟统计
+runai doctor                          # 健康检查；`--fix` 清理 dangling symlink
 ```
 
-默认 provider 是 OpenAI 兼容（DeepSeek `deepseek-v4-flash`，~1s/次，便宜）。也支持 Anthropic Messages API（`provider = "anthropic"`，`model = "claude-haiku-4-5-20251001"`）。任何 OpenAI 兼容服务都能接：Moonshot / Groq / vLLM 等。
+完整 CLI 列表：`runai --help`。
 
-API key 也能走环境变量 `RUNAI_RECOMMEND_API_KEY`。配置在 `~/.runai/config.toml`，unix 下权限 `0o600`。
+---
 
-## TUI 快捷键
+## 数据放在哪
 
-底部显示常用按键，按 `?` 打开完整帮助面板。
+```
+~/.runai/                              ~/.{claude,codex,gemini,opencode}/skills/
+├── skills/<name>/SKILL.md            └── <name> -> ~/.runai/skills/<name>     ← symlink = 启用
+├── mcps/<name>.json                  ~/.claude.json          ← MCP 条目 (Claude)
+├── groups/<id>.toml                  ~/.codex/config.toml    ← MCP 条目 (Codex)
+├── trash/<trash-id>/                 ~/.gemini/settings.json ← MCP 条目 (Gemini)
+├── backups/<timestamp>/              ~/.config/opencode/opencode.json ← MCP 条目 (OpenCode)
+├── market-cache/
+├── config.toml                        ← runai recommend 配置 (provider, model, api_key)
+└── runai.db                           ← SQLite: skill 元数据 / 使用统计 / router_events / AI summary
+```
 
-| 按键 | 操作 |
-|------|------|
-| `j/k` | 上下导航 |
-| `H/L` 或 `Tab` | 切换标签页（Skills / MCPs / Groups / Market / Trash） |
-| `Space` | 启用/禁用 |
-| `Enter` | 打开分组详情 / 从市场安装 |
-| `d` | 将选中的 skill/MCP 移入垃圾桶 |
-| `r` | 恢复选中的垃圾桶条目（Trash 标签页） |
-| `Shift+D` | 彻底删除选中的垃圾桶条目（Trash 标签页） |
-| `/` | 搜索过滤 |
-| `1234` | 切换 CLI 目标（Claude/Codex/Gemini/OpenCode） |
-| `i` | 从 GitHub 安装 |
-| `t` | 切换深色/亮色主题 |
-| `?` | 帮助面板（所有快捷键） |
-| `q` | 退出 |
+首次启动自动从 `~/.skill-manager/` 迁移过来（v0.5.0 转换）。Env 覆盖支持：`RUNE_DATA_DIR` 和 `SKILL_MANAGER_DATA_DIR`。
 
-## MCP 工具（21 个）
+---
 
-作为 MCP 服务器运行时（`runai mcp-serve`），提供 21 个工具：
+## 项目结构
 
-**Skills 和 MCPs**
+| 模块 | 源码 | 干什么 |
+|---|---|---|
+| `cli/` | `src/cli/mod.rs` | clap 子命令分发；每个 `runai <verb>` 的入口 |
+| `core::manager` | `src/core/manager.rs` | `SkillManager` 协调 install / enable / disable / trash / migrate |
+| `core::scanner` | `src/core/scanner.rs` | 文件系统发现 + 未管理 skill 的 adopt（含 cross-data-dir 安全 guard）|
+| `core::linker` | `src/core/linker.rs` | 跨平台 symlink create / remove / detect |
+| `core::recommend` | `src/core/recommend.rs` | LLM skill router (BM25 + AI summary + LLM rerank + adoption tracking) |
+| `core::db` | `src/core/db.rs` | SQLite schema (v14) + migration + 查询层 |
+| `core::installer` | `src/core/installer.rs` | GitHub / market 安装流水线 |
+| `mcp::tools` | `src/mcp/tools.rs` | 22 个 `sm_*` 工具通过 MCP stdio 暴露 |
+| `tui/` | `src/tui/` | ratatui + crossterm 全屏 UI |
+| `server` | `src/server.rs` | axum dashboard 服务 router 遥测 |
 
-| 工具 | 说明 |
-|------|------|
-| `sm_list` | 列出 skills/MCPs 及使用次数（支持按类型/分组/目标过滤） |
-| `sm_status` | 各 CLI 的启用/总数统计 |
-| `sm_enable` / `sm_disable` | 启用/禁用（支持模糊组名匹配） |
-| `sm_delete` | 将 skill/MCP 移入全局垃圾桶 |
-| `sm_scan` | 扫描已知目录发现新 skills |
-| `sm_search` | 统一搜索已安装资源 + 市场 |
+每个模块的深度文档在 `src/**/*.LLM.md`。架构不变量在 [AGENTS.md](AGENTS.md)。
 
-**安装**
+---
 
-| 工具 | 说明 |
-|------|------|
-| `sm_install` | 返回 CLI 安装命令（AI 通过 Bash 执行，避免代理超时） |
-| `sm_market` | 浏览缓存的市场 skills（按源/关键词/路径过滤） |
-| `sm_market_install` | 返回市场安装 CLI 命令 |
+## 设计原则
 
-**分组**
+- **文件系统是真值** —— Skill 启用 = symlink 存在。MCP 启用 = config 条目存在。DB 只是元数据；删掉 DB 也能从磁盘重建。
+- **Trash-first 全员通用** —— 删除可恢复，直到 `runai trash purge`。备份带时间戳，可还原。
+- **单 binary，无运行时依赖** —— Web dashboard 资产 `include_str!` 进 binary。rusqlite bundled。无 node、无 python、无 Docker。
+- **Router opt-in** —— 默认 `enabled = false`；`runai recommend setup` 之前没有任何网络请求。
+- **真采用 > self-report** —— 计数靠 Claude Code 自己的工具调用日志（PostToolUse hook on `Read`），不是 agent 自己说。
+- **破坏性 syscall 加 guard** —— `scan` / `adopt` 在 2026-04-27 事故后拒绝跨 data dir 做 `rename`。`tests/safety_e2e.rs` 物理 e2e 测试锁不变量。
+- **文档同步铁律** —— 每个代码改动同 commit 改 `*.LLM.md`（见 [AGENTS.md](AGENTS.md)）。
 
-| 工具 | 说明 |
-|------|------|
-| `sm_groups` | 列出所有分组及成员数 + 200 字描述预览（完整描述用 `runai group show <id>` CLI 查看） |
-| `sm_create_group` / `sm_delete_group` | 创建/删除分组 |
-| `sm_group_members` | 添加/移除成员，或更新分组元数据 |
-
-**垃圾桶**
-
-| 工具 | 说明 |
-|------|------|
-| `sm_trash` | 列出全局垃圾桶条目 |
-| `sm_trash_restore` | 按垃圾桶 ID 或资源名恢复条目 |
-| `sm_trash_purge` | 按垃圾桶 ID 或资源名彻底删除条目 |
-
-**使用追踪**
-
-| 工具 | 说明 |
-|------|------|
-| `sm_usage_stats` | 查看使用统计，按使用次数排序 |
-
-**备份与工具**
-
-| 工具 | 说明 |
-|------|------|
-| `sm_backup` | 创建带时间戳的备份 |
-| `sm_restore` | 从备份恢复（默认最新，可指定时间戳） |
-| `sm_backups` | 列出所有可用备份 |
-
-## 多 CLI 配置格式
-
-| CLI | 配置文件 | 格式 |
-|-----|---------|------|
-| Claude | `~/.claude.json` | JSON (`mcpServers`) |
-| Codex | `~/.codex/config.toml` | TOML (`[mcp_servers.*]`) |
-| Gemini | `~/.gemini/settings.json` | JSON (`mcpServers`) |
-| OpenCode | `~/.config/opencode/opencode.json` | JSON (`mcp`，command=数组) |
-
-## 数据存储
-
-所有数据存储在 `~/.runai/`：
-- `skills/` — 托管的 skill 目录（每个包含 SKILL.md）
-- `mcps/` — 被禁用的 MCP 配置备份（JSON）
-- `groups/` — 分组定义（TOML 文件）
-- `trash/` — 已删除但仍可恢复/彻底删除的资源载荷
-- `backups/` — 带时间戳的完整备份
-- `market-cache/` — 市场 skill 列表缓存（JSON，1 小时有效期）
-- `market-sources.json` — 自定义市场源
-- `runai.db` — SQLite 数据库（skill 元数据、使用统计、分组成员）
-
-## 从 skill-manager 迁移
-
-Runai v0.5.0 首次启动时自动迁移：
-1. 数据目录：`~/.skill-manager/` → `~/.runai/`
-2. 数据库：`skill-manager.db` → `runai.db`
-3. 软链接：所有 CLI skill 软链接自动重新指向
-4. MCP 条目：所有 CLI 配置中 `skill-manager` → `runai`
-5. 环境变量：`RUNE_DATA_DIR` 和 `SKILL_MANAGER_DATA_DIR` 都可用
-
-无需手动操作，所有数据完整保留。
+---
 
 ## 许可证
 

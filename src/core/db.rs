@@ -111,7 +111,10 @@ fn row_to_router_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<RouterEvent> {
         bm25_kept: r.get(19)?,
         llm_raw_response: r.get(20)?,
         hook_output: r.get(21)?,
-        llm_input: r.get::<_, Option<String>>(22).unwrap_or_default().unwrap_or_default(),
+        llm_input: r
+            .get::<_, Option<String>>(22)
+            .unwrap_or_default()
+            .unwrap_or_default(),
     })
 }
 

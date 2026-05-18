@@ -1120,9 +1120,8 @@ fn handle_recommend(
                             .router_session_recommended_skills(sid)
                             .unwrap_or_default()
                     };
-                    let out = crate::core::recommend::format_for_hook_full(
-                        &decision, sid, &history,
-                    );
+                    let out =
+                        crate::core::recommend::format_for_hook_full(&decision, sid, &history);
                     if !out.is_empty() {
                         print!("{out}");
                     }
@@ -1319,7 +1318,11 @@ To install/uninstall automatically (preserves existing hooks and theme):
             }
             println!(
                 "recorded adoption: {skill}{}",
-                if sid.is_empty() { "" } else { " (session-deduped)" }
+                if sid.is_empty() {
+                    ""
+                } else {
+                    " (session-deduped)"
+                }
             );
             Ok(())
         }

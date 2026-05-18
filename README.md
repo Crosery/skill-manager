@@ -1,217 +1,195 @@
-# Runai
+<div align="center">
 
-**English** | [中文](README_zh.md)
+<img src="docs/images/runai-hero.png" alt="runai" width="100%" />
 
-<p align="center">
-  <img src="docs/images/runai-logo.png" alt="runai logo" width="180">
+# runai
+
+### One terminal-native router for your AI CLI skills
+
+<p>跨 Claude Code / Codex / Gemini CLI / OpenCode 的统一 skill / MCP 管理 + LLM 智能路由器 + 实时遥测仪表盘。</p>
+
+<p>
+  <a href="README.md"><b>English</b></a>
+  &nbsp;|&nbsp;
+  <a href="README_zh.md"><b>中文</b></a>
 </p>
 
-**runai** — a Swiss Army knife for managing AI CLI skills and MCP servers.
+<p>
+  <a href="#quickstart"><b>Quickstart</b></a>
+  &nbsp;·&nbsp;
+  <a href="#three-pillars"><b>Three Pillars</b></a>
+  &nbsp;·&nbsp;
+  <a href="#architecture"><b>Architecture</b></a>
+  &nbsp;·&nbsp;
+  <a href="AGENTS.md"><b>AGENT guide</b></a>
+</p>
 
-Skills and MCP servers live scattered across Claude Code, Codex, Gemini CLI, and OpenCode — each with its own config file and quirks. runai gives you one TUI (plus a scriptable CLI and an MCP server) to browse, enable, install, search, and back up all of it at once, on **macOS / Linux / Windows**.
+<sub>Single Rust binary · macOS / Linux / Windows · No runtime deps · MIT</sub>
 
-- Install any skill from GitHub into all four CLIs with one command
-- 2,000+ skills one-click installable from the built-in market
-- Filesystem is the source of truth: symlink exists = enabled, gone = disabled
-- Native config formats for Claude JSON, Codex TOML, Gemini JSON, OpenCode JSON
-- Native binaries for three OSes; Developer Mode recommended on Windows for symlinks
+</div>
 
-## Features
+---
 
-- **TUI Interface** — Browse, enable/disable, search skills and MCPs with a terminal UI
-- **Multi-CLI Support** — Manage resources across 4 AI CLIs, switch targets with `1234`
-- **Groups** — Organize skills/MCPs into groups, batch enable/disable, rename
-- **One-Step Install** — `runai install owner/repo` downloads, registers, groups, and enables
-- **Market Install** — Browse 2000+ skills, Enter to install directly from TUI Market tab
-- **Trash & Restore** — Deletes go into a global trash tab first, with restore and permanent purge
-- **Skill Discovery** — Built-in recursive scanner finds all SKILL.md on disk in seconds
-- **Unified Search** — `sm_search` searches installed resources and market at once
-- **Usage Tracking** — Track skill usage count and last-used time, identify unused skills
-- **MCP Server** — 21 tools exposed via MCP protocol, auto-registered to all CLIs on first launch
-- **Batch Operations** — Batch enable/disable/delete/install multiple resources in one call
-- **Multi-CLI Config** — Native format support: Claude JSON, Codex TOML, OpenCode custom JSON, Gemini JSON
-- **Dark/Light Theme** — Press `t` to toggle, optimized for both terminal backgrounds
-- **Filesystem as Source of Truth** — Skill enabled = symlink exists; MCP enabled = config entry exists
-- **Backup & Restore** — Timestamped full backups of skill directories, MCP configs, and CLI configs
-- **Auto Migration** — Seamless upgrade from `skill-manager` to `runai` (data dir, DB, symlinks, MCP entries)
-- **CLI** — Subcommands for scripting and automation
+<div align="center">
 
-## Install
+## Architecture
+
+<img src="docs/images/runai-architecture.png" alt="runai architecture" width="60%" />
+
+</div>
+
+---
+
+## One-liner
+
+`runai` unifies how you install, enable, recommend, and observe AI CLI skills across four host CLIs. Skills are real folders on disk symlinked into each CLI's skills directory; MCP servers are real entries in each CLI's config file. Filesystem = source of truth, DB only holds metadata.
+
+On top of that core, an opt-in LLM skill **router** auto-picks the right skill for every user prompt (BM25 prefilter + LLM rerank with verified-adoption counting), and a local **dashboard** at `http://127.0.0.1:17888` shows every hook invocation, token cost, latency, and chosen skill in real time.
+
+---
+
+## Pain points it solves
+
+| Before | runai |
+|---|---|
+| Skills scattered across Claude Code / Codex / Gemini / OpenCode, each with its own config quirks | One TUI + CLI + MCP server manages all four; native config format per target |
+| `git clone` a skill repo, copy folders, edit JSON / TOML by hand, repeat for every CLI | `runai install owner/repo` — downloads, registers, groups, symlinks into every CLI in one shot |
+| 2000+ skills out there, no way to browse without leaving the terminal | Built-in market: `runai market` browses cached index, Enter to install |
+| Hard-deleted skills can't be recovered when you change your mind | Trash-first: `runai uninstall` moves to `~/.runai/trash/`, `runai trash restore` brings it back |
+| "Did I enable that skill?" — `ls` four directories, compare with config files, hope they agree | Source of truth = symlink existence + config entry presence; `runai status` reads filesystem live |
+| No idea which skills you actually use, no idea what the router is doing per turn | Dashboard at 127.0.0.1:17888 — every router call logged with chosen skill, BM25 hits, full LLM input, hook output, latency, tokens |
+
+---
+
+## Three pillars
+
+### 1. Multi-CLI skill / MCP manager
+
+- **Install once, enabled everywhere** — `runai install owner/repo[@branch]` downloads the skill, registers it in DB, and symlinks into all four CLI skill dirs. MCP entries get written into each CLI's native config (Claude JSON / Codex TOML / Gemini JSON / OpenCode JSON).
+- **Filesystem = truth** — Skill enabled ⇔ symlink exists at `<cli-home>/skills/<name>`. MCP enabled ⇔ entry present (without `"disabled": true`) in target config. The DB is metadata-only; nothing breaks if you blow it away.
+- **Groups** — Cluster related skills (`figma`, `ktv-car-project`, `ppt-slides`, …) into named groups; enable / disable / rename whole groups atomically.
+- **Market** — Built-in skill marketplace with 2,000+ skills curated; cached locally, refreshed in the background (1h TTL). `runai market install <name>` is one-shot.
+- **Safe delete** — Everything trash-first. Restore until you `runai trash purge`.
+
+### 2. LLM skill router (opt-in)
+
+- **Hook integration** — Claude Code's `UserPromptSubmit` hook → `runai recommend` → router decides → output injected into the agent's prompt as additional context.
+- **BM25 prefilter + LLM rerank** — Bilingual (latin + CJK) BM25 on AI-generated summaries; top 30 candidates handed to the router LLM (DeepSeek v4-flash by default; any OpenAI-compatible / Anthropic / `claude-cli` backend works). Hybrid score = `BM25 × 0.4 + LLM_quality × 0.6`.
+- **AI summary enrichment** — Every skill gets a bilingual, structured summary (`task / triggers / inputs / outputs / not-for / score`) generated by the same LLM; reused as the BM25 indexing doc and the router's candidate context. Auto-refreshes on SKILL.md edit, and `runai install` / `scan` fire targeted re-enrich for just the changed skills.
+- **Two modes** — `EXCLUSIVE` lets the main agent pick from candidates; `COMPATIBLE` loads several complementary skills at once for workflow-style prompts ("整套调试链路" / "完整发版流程"). Same-session dedup so already-adopted skills don't get re-recommended.
+- **Verified adoption** — When the main agent actually `Read`s a `<skills_dir>/<X>/SKILL.md`, a `PostToolUse` hook bumps `usage_count` and writes a session adoption row. Self-report (`runai recommend used`) is fallback. The signal is Claude Code's own tool-call log, not the agent's word.
+- **`runai recommend get <skill>`** — Atomic skill activation: stdout = SKILL.md body, side effect = usage_count +1 + session adoption. Hook output gives this command instead of a raw path, so calling it = adopting it.
+
+### 3. Realtime telemetry dashboard
+
+- **Single binary, no CDN** — `runai server` boots an embedded axum HTTP server; `web/{index.html,app.css,app.js}` are `include_str!`'d into the Rust binary.
+- **Auto-launch on every Claude Code session** — `runai server --install-hook` adds a `SessionStart` hook so the dashboard is always at `http://127.0.0.1:17888` when you open Claude Code.
+- **Every router call instrumented** — Per-event: model + provider, mode (compat / excl), candidate count, BM25 kept, prompt / completion / total tokens, latency, chosen skills, status, error, full user prompt, working dir, full LLM input string (64 KB cap), full hook output the agent received.
+- **Per-skill drill-down** — `/skills` lists every managed skill with usage count, LLM quality score, AI summary; click into one to see its full directory tree (browse SKILL.md + supporting files), recent usage events, raw description vs. enriched summary.
+- **Live polling** — 5s refresh with `inFlight` guard and `visibilitychange` pause. Per-boot cache-buster on static assets means a server restart after `cargo install` propagates without a hard refresh.
+
+---
+
+## Quickstart
+
+### Install
 
 ```bash
-git clone https://github.com/Crosery/runai.git
-cd runai
-cargo install --path .
+cargo install --git https://github.com/Crosery/runai
+# or download a prebuilt binary
+curl -fsSL https://github.com/Crosery/runai/releases/latest/download/runai-darwin-arm64.tar.gz \
+  | tar xz && mv runai ~/.cargo/bin/
 ```
 
-### Windows
+Prebuilt artifacts for `{linux,darwin,windows} × {amd64,arm64}` on the [releases page](https://github.com/Crosery/runai/releases).
+Windows needs Developer Mode or Administrator for symlinks.
 
-Pre-built binary: download `runai-windows-amd64.zip` from [releases](https://github.com/Crosery/runai/releases) and put `runai.exe` on your PATH. Or build from source with `cargo install --path .`.
-
-**Symlink prerequisite**: runai uses filesystem symlinks as the source of truth for "skill enabled". Windows creating symlinks requires one of:
-
-- **Developer Mode** enabled (Settings → Privacy & security → For developers → Developer Mode), or
-- Running the shell as **Administrator**
-
-Without either, `enable`/`install` will fail when creating the symlink. Developer Mode is the recommended option (no elevation per-invocation).
-
-CLI config files are read from the same user-home paths as unix (`%USERPROFILE%\.claude.json`, `.codex\config.toml`, `.gemini\settings.json`, `.config\opencode\opencode.json`) — verified against each CLI's source.
-
-## Quick Start
+### First-run setup
 
 ```bash
-# Launch TUI (first run will scan, register MCP, and migrate from skill-manager if needed)
+# 1) Boot the TUI to browse / enable existing skills you already have plus 2000+ market entries
 runai
 
-# Install skills from GitHub (auto-download, register, group, enable)
-runai install pbakaus/impeccable
-runai install MiniMax-AI/skills
+# 2) Opt-in to the LLM router (default DeepSeek v4-flash, ~$0.0001 per route call)
+runai recommend setup
+runai recommend install-hook          # writes UserPromptSubmit + PostToolUse + SessionStart hooks
+                                       # into ~/.claude/settings.json (idempotent, .runai-bak backup)
 
-# Install from market
-runai market-install github
-
-# Show usage statistics
-runai usage --top 10
-
-# Discover all skills on disk
-runai discover
-
-# CLI management
-runai list                    # List all skills and MCPs
-runai status                  # Show enabled counts
-runai enable brainstorming    # Enable a skill
-runai uninstall brainstorming # Move a resource into trash
-runai trash list              # List trash entries
-runai trash restore brainstorming
-runai scan                    # Scan known directories
-runai backup                  # Create a backup
-runai backups                 # List existing backups
-runai search figma            # Search installed resources and market
-runai market --search figma   # Browse market skills, optional --source filter
-runai group delete my-group   # Remove a group definition (members untouched)
-runai group update my-group --name "New Name" --description "..."
+# 3) Launch the dashboard once; the hook keeps it running thereafter
+runai server --port 17888 --ensure
+runai server --install-hook            # auto-launch on every Claude Code session
 ```
 
-## Skill auto-routing (opt-in)
+After step 2, every Claude Code prompt routes through `runai recommend`, every SKILL.md `Read` records adoption, and every event lands in the dashboard.
 
-Tell Claude Code which installed skills are relevant for each prompt — without typing skill names yourself. A small LLM picks top-K skills from your installed set and runai emits their full `SKILL.md` content into the Claude Code conversation via a `UserPromptSubmit` hook.
-
-Disabled by default. To enable:
+### Daily commands
 
 ```bash
-runai recommend setup          # interactive: pick provider, paste API key, choose model
-runai recommend hook-snippet   # prints the JSON to drop into ~/.claude/settings.json
-runai recommend status         # shows current config (API key redacted)
+runai                                 # TUI
+runai install owner/repo              # install skill from GitHub into all CLIs
+runai market install <name>           # install from market
+runai search <query>                  # search installed + market
+runai status                          # show enabled / disabled across all CLIs
+runai list --target claude            # one-CLI view
+runai backup                          # timestamped backup of skills + configs
+runai trash                           # browse deleted, restore or purge
+runai recommend enrich                # regenerate AI summaries (changed-mtime detection)
+runai recommend stats                 # router LLM usage / cost / latency over time
+runai doctor                          # health check; `--fix` prunes dangling symlinks
 ```
 
-Default provider is OpenAI-compatible with DeepSeek (`deepseek-v4-flash`, ~1s per route, very cheap). Anthropic Messages API also supported (set `provider = "anthropic"`, `model = "claude-haiku-4-5-20251001"`). Any OpenAI-compatible backend works — Moonshot, Groq, vLLM, etc.
+Full CLI list: `runai --help`.
 
-API key can also come from env `RUNAI_RECOMMEND_API_KEY`. Config lives at `~/.runai/config.toml` with `0o600` permission.
+---
 
-## TUI Keybindings
+## What lives where
 
-Footer shows essential keys. Press `?` for full help panel.
+```
+~/.runai/                              ~/.{claude,codex,gemini,opencode}/skills/
+├── skills/<name>/SKILL.md            └── <name> -> ~/.runai/skills/<name>     ← symlink = enabled
+├── mcps/<name>.json                  ~/.claude.json          ← MCP entries (Claude)
+├── groups/<id>.toml                  ~/.codex/config.toml    ← MCP entries (Codex)
+├── trash/<trash-id>/                 ~/.gemini/settings.json ← MCP entries (Gemini)
+├── backups/<timestamp>/              ~/.config/opencode/opencode.json ← MCP entries (OpenCode)
+├── market-cache/
+├── config.toml                        ← runai recommend config (provider, model, api_key)
+└── runai.db                           ← SQLite: skill metadata, usage, router_events, AI summaries
+```
 
-| Key | Action |
-|-----|--------|
-| `j/k` | Navigate up/down |
-| `H/L` or `Tab` | Switch tabs (Skills / MCPs / Groups / Market / Trash) |
-| `Space` | Toggle enable/disable |
-| `Enter` | Open group detail / Install from market |
-| `d` | Move selected skill/MCP into trash |
-| `r` | Restore selected trash entry (Trash tab) |
-| `Shift+D` | Permanently delete selected trash entry (Trash tab) |
-| `/` | Search filter |
-| `1234` | Switch CLI target (Claude/Codex/Gemini/OpenCode) |
-| `i` | Install from GitHub |
-| `t` | Toggle dark/light theme |
-| `?` | Help panel (all keybindings) |
-| `q` | Quit |
+Auto-migrated from `~/.skill-manager/` on first launch (v0.5.0 transition). Env overrides honored: `RUNE_DATA_DIR` and `SKILL_MANAGER_DATA_DIR`.
 
-## MCP Tools (21)
+---
 
-When running as MCP server (`runai mcp-serve`), 21 tools are available:
+## Project layout
 
-**Skills & MCPs**
+| Module | Source | What it does |
+|---|---|---|
+| `cli/` | `src/cli/mod.rs` | clap subcommand dispatch; entry point for every `runai <verb>` |
+| `core::manager` | `src/core/manager.rs` | `SkillManager` orchestrates install / enable / disable / trash / migrate |
+| `core::scanner` | `src/core/scanner.rs` | Filesystem discovery + adoption of unmanaged skills (with cross-data-dir safety guard) |
+| `core::linker` | `src/core/linker.rs` | Cross-platform symlink create / remove / detect |
+| `core::recommend` | `src/core/recommend.rs` | LLM skill router (BM25 + AI summary + LLM rerank + adoption tracking) |
+| `core::db` | `src/core/db.rs` | SQLite schema (v14) + migrations + queries |
+| `core::installer` | `src/core/installer.rs` | GitHub / market install pipeline |
+| `mcp::tools` | `src/mcp/tools.rs` | 22 `sm_*` tools exposed via MCP stdio |
+| `tui/` | `src/tui/` | ratatui + crossterm full-screen UI |
+| `server` | `src/server.rs` | axum dashboard for router telemetry |
 
-| Tool | Description |
-|------|-------------|
-| `sm_list` | List skills/MCPs with usage count (supports kind/group/target filters) |
-| `sm_status` | Enabled/total counts per CLI target |
-| `sm_enable` / `sm_disable` | Toggle skill/MCP for a CLI (supports fuzzy group name) |
-| `sm_delete` | Move a skill/MCP into global trash |
-| `sm_scan` | Scan known directories for new skills |
-| `sm_search` | Unified search across installed resources + market |
+Per-module deep-dive docs in `src/**/*.LLM.md`. Architecture invariants in [AGENTS.md](AGENTS.md).
 
-**Install**
+---
 
-| Tool | Description |
-|------|-------------|
-| `sm_install` | Returns CLI command for fast GitHub install (agent runs via Bash) |
-| `sm_market` | Browse cached market skills (filter by source/search/repo path) |
-| `sm_market_install` | Returns CLI command for market install |
+## Design principles
 
-**Groups**
+- **Filesystem is the source of truth.** Skill enabled = symlink exists. MCP enabled = config entry present. DB carries metadata only; rebuild it from disk any time.
+- **Trash-first everywhere.** Delete is reversible until `runai trash purge`. Backups timestamped, restorable.
+- **Single binary, no runtime deps.** Web dashboard assets `include_str!`'d in. rusqlite bundled. No node, no python, no Docker.
+- **Router is opt-in.** Default `enabled = false`; nothing reaches a network until `runai recommend setup`.
+- **Verified adoption over self-report.** Counting comes from Claude Code's own tool-call log (PostToolUse hook on `Read`), not the agent's promise.
+- **Safety guards on destructive syscalls.** `scan` / `adopt` refuse to `rename` across data dirs after the 2026-04-27 incident. Physical-e2e tests in `tests/safety_e2e.rs` lock the invariant.
+- **Documentation invariant.** Every code change ships its `*.LLM.md` update in the same commit (see [AGENTS.md](AGENTS.md)).
 
-| Tool | Description |
-|------|-------------|
-| `sm_groups` | List all groups with member counts + 200-char description preview (full description via `runai group show <id>` CLI) |
-| `sm_create_group` / `sm_delete_group` | Create or delete a group |
-| `sm_group_members` | Add/remove/update group members and metadata |
-
-**Trash**
-
-| Tool | Description |
-|------|-------------|
-| `sm_trash` | List global trash entries |
-| `sm_trash_restore` | Restore a trash entry by trash ID or resource name |
-| `sm_trash_purge` | Permanently delete a trash entry by trash ID or resource name |
-
-**Usage Tracking**
-
-| Tool | Description |
-|------|-------------|
-| `sm_usage_stats` | Show usage statistics sorted by most used |
-
-**Backup & Utility**
-
-| Tool | Description |
-|------|-------------|
-| `sm_backup` | Create timestamped backup |
-| `sm_restore` | Restore from backup (latest or by timestamp) |
-| `sm_backups` | List all available backups |
-
-## Multi-CLI Config Formats
-
-| CLI | Config File | Format |
-|-----|-------------|--------|
-| Claude | `~/.claude.json` | JSON (`mcpServers`) |
-| Codex | `~/.codex/config.toml` | TOML (`[mcp_servers.*]`) |
-| Gemini | `~/.gemini/settings.json` | JSON (`mcpServers`) |
-| OpenCode | `~/.config/opencode/opencode.json` | JSON (`mcp`, command=array) |
-
-## Data
-
-All data stored in `~/.runai/`:
-- `skills/` — Managed skill directories (each with SKILL.md)
-- `mcps/` — Disabled MCP config backups (JSON)
-- `groups/` — Group definitions (TOML files)
-- `trash/` — Deleted resource payloads kept for restore/purge
-- `backups/` — Timestamped full backups
-- `market-cache/` — Cached market skill lists (JSON, 1hr TTL)
-- `market-sources.json` — Custom market sources
-- `runai.db` — SQLite database (skill metadata, usage stats, group members)
-
-## Migration from skill-manager
-
-Runai v0.5.0 auto-migrates on first launch:
-1. Data directory: `~/.skill-manager/` → `~/.runai/`
-2. Database: `skill-manager.db` → `runai.db`
-3. Symlinks: all CLI skill symlinks repointed automatically
-4. MCP entries: `skill-manager` → `runai` in all CLI configs
-5. Environment variables: both `RUNE_DATA_DIR` and `SKILL_MANAGER_DATA_DIR` accepted
-
-No manual steps needed. All data is preserved.
+---
 
 ## License
 

@@ -229,10 +229,7 @@ fn recommend_post_tool_records_on_skill_read() {
     let env = TestEnv::new();
     env.plant_skill("delta", "test skill delta");
 
-    let skill_md = env
-        .managed_skills_dir()
-        .join("delta")
-        .join("SKILL.md");
+    let skill_md = env.managed_skills_dir().join("delta").join("SKILL.md");
     let payload = format!(
         r#"{{"tool_name":"Read","tool_input":{{"file_path":"{}"}},"session_id":"sess-D"}}"#,
         skill_md.display()

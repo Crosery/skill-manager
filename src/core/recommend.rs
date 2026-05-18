@@ -671,10 +671,7 @@ pub fn recommend(
     // Counted paths:
     //   - Compatible multi where the SKILL.md body is inlined → all skills
     //     in the set are pushed to the agent, count each.
-    if ev.status == "ok"
-        && decision.mode == RouterMode::Compatible
-        && decision.skills.len() > 1
-    {
+    if ev.status == "ok" && decision.mode == RouterMode::Compatible && decision.skills.len() > 1 {
         for s in &decision.skills {
             let _ = mgr.record_usage(&s.name);
         }
@@ -1369,8 +1366,7 @@ pub fn format_for_hook_full(
         .join(" | ");
     // Filter out skills currently being recommended — they're obviously
     // already on the agent's screen, no point re-listing them as history.
-    let current: std::collections::HashSet<&str> =
-        skills.iter().map(|s| s.name.as_str()).collect();
+    let current: std::collections::HashSet<&str> = skills.iter().map(|s| s.name.as_str()).collect();
     let history_filtered: Vec<&str> = session_history
         .iter()
         .map(|s| s.as_str())
@@ -1968,8 +1964,9 @@ pub fn install_claude_hook(home: &Path) -> Result<HookInstallStatus> {
             .get("hooks")
             .and_then(|h| h.as_array())
             .map(|arr| {
-                arr.iter()
-                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(POST_TOOL_HOOK_COMMAND))
+                arr.iter().any(|h| {
+                    h.get("command").and_then(|c| c.as_str()) == Some(POST_TOOL_HOOK_COMMAND)
+                })
             })
             .unwrap_or(false)
     });
@@ -2229,11 +2226,7 @@ mod tests {
             r#"{{"type":"user","timestamp":"2026-05-17T10:04:00Z","message":{{"role":"user","content":"hi"}}}}"#,
         );
         let transcript = tmp.path().join("session.jsonl");
-        std::fs::write(
-            &transcript,
-            [line1, line2, line3, line4, line5].join("\n"),
-        )
-        .unwrap();
+        std::fs::write(&transcript, [line1, line2, line3, line4, line5].join("\n")).unwrap();
 
         let adopted = transcript_adopted_skills(&transcript, &skills_dir);
         assert_eq!(adopted.len(), 2);
