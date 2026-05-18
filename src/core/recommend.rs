@@ -671,7 +671,17 @@ pub fn recommend(
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
-        format_for_hook_full(&decision, session_id.unwrap_or(""), &history)
+        // CLI / library callers (cli/mod.rs `recommend`) default to the
+        // local dashboard server URL. The server endpoint path
+        // (server::handle_recommend) overrides via its own call to
+        // format_for_hook_full with server_url + user_header.
+        format_for_hook_full(
+            &decision,
+            session_id.unwrap_or(""),
+            &history,
+            "http://127.0.0.1:17888",
+            "",
+        )
     } else {
         String::new()
     };
@@ -1285,26 +1295,36 @@ fn write_last_recommend(paths: &AppPaths, decision: &RouterDecision) {
 }
 
 /// Format the router decision as the `UserPromptSubmit` hook stdout. Single
-/// unified template (`hook_output.md`) — no per-mode branches, no path or
-/// SKILL.md body anywhere, no negative phrasing. The main agent always sees
-/// the same shape: candidate list + the one activation command + a mode-
-/// specific directive on how to pick.
+/// unified template (`hook_output.md`) that renders **exactly one**
+/// activation flavour — `curl` against a runai server URL. Every
+/// instruction the main Claude agent ever sees (activation, recall,
+/// feedback) uses this HTTP shape, so there is no per-machine "do I have
+/// the binary on PATH?" branch. Local users still have the `runai`
+/// CLI available for scripts and manual use, but the agent-facing
+/// protocol is uniformly HTTP.
 ///
-/// `session_history` holds skill names the router has already proposed
-/// earlier in this Claude Code session. It's rendered as a session-recall
-/// block so the main agent can spot "router pushed X earlier, this prompt
-/// finally matches" without the user having to repeat themselves.
-pub fn format_for_hook(decision: &RouterDecision) -> String {
-    render_hook_output(decision, "", &[])
+/// `server_url` is the base of the runai server the agent should curl —
+/// `http://127.0.0.1:17888` for local users (the dashboard server already
+/// runs there via `ensure_running`), or the LAN URL when a teammate's
+/// hook proxied through it.
+///
+/// `user_header` is the literal CLI arg fragment to attach to every
+/// curl call. Empty means no header; otherwise it's of the form
+/// ` -H 'X-Runai-User: <user>@<host>'` and gets pasted straight after
+/// the URL.
+pub fn format_for_hook(decision: &RouterDecision, server_url: &str, user_header: &str) -> String {
+    render_hook_output(decision, "", &[], server_url, user_header)
 }
 
-/// Same as `format_for_hook` but with an explicit Claude Code session id
-/// substituted into the activation command. Empty `session_id` yields a
-/// literal `{SESSION_ID}` placeholder; `runai recommend get` reads
-/// `CLAUDE_SESSION_ID` from env, so an absent id just means no per-session
-/// dedup.
-pub fn format_for_hook_with_session(decision: &RouterDecision, session_id: &str) -> String {
-    render_hook_output(decision, session_id, &[])
+/// Same as `format_for_hook` but with an explicit session id used in the
+/// session-history recall block.
+pub fn format_for_hook_with_session(
+    decision: &RouterDecision,
+    session_id: &str,
+    server_url: &str,
+    user_header: &str,
+) -> String {
+    render_hook_output(decision, session_id, &[], server_url, user_header)
 }
 
 /// Full variant: also renders this-session recall (`session_history` from
@@ -1313,14 +1333,24 @@ pub fn format_for_hook_full(
     decision: &RouterDecision,
     session_id: &str,
     session_history: &[String],
+    server_url: &str,
+    user_header: &str,
 ) -> String {
-    render_hook_output(decision, session_id, session_history)
+    render_hook_output(
+        decision,
+        session_id,
+        session_history,
+        server_url,
+        user_header,
+    )
 }
 
 fn render_hook_output(
     decision: &RouterDecision,
     session_id: &str,
     session_history: &[String],
+    server_url: &str,
+    user_header: &str,
 ) -> String {
     let skills = &decision.skills;
     if skills.is_empty() {
@@ -1336,11 +1366,11 @@ fn render_hook_output(
     let activation_directive = match (decision.mode, skills.len()) {
         (RouterMode::Exclusive, 1) => "对口就跑命令激活；不对口忽略即可。".to_string(),
         (RouterMode::Exclusive, _) => {
-            "一句话让用户挑（单选或多选都行），用户挑完对每个选中的 skill 各跑一次 get 命令。"
+            "一句话让用户挑（单选或多选都行），用户挑完对每个选中的 skill 各跑一次激活 curl。"
                 .to_string()
         }
         (RouterMode::Compatible, _) => {
-            "互补激活：对每个候选 skill 各跑一次 get 命令，跑完立即组合执行用户原 prompt。"
+            "互补激活：对每个候选 skill 各跑一次激活 curl，跑完立即组合执行用户原 prompt。"
                 .to_string()
         }
     };
@@ -1357,8 +1387,9 @@ fn render_hook_output(
     };
 
     // Session-recall list: names the router has shown earlier in this
-    // session, minus the ones currently on screen. The wording is plain
-    // positive — no "don't Read", no "path not exposed".
+    // session, minus the ones currently on screen. Uses the same curl
+    // activation shape as the primary block so the agent never has to
+    // learn two protocols.
     let current: std::collections::HashSet<&str> = skills.iter().map(|s| s.name.as_str()).collect();
     let history_filtered: Vec<&str> = session_history
         .iter()
@@ -1366,11 +1397,12 @@ fn render_hook_output(
         .filter(|n| !current.contains(n))
         .take(10)
         .collect();
+    let _ = session_id; // session id is currently not embedded in the recall block; reserved for future use
     let session_history_block = if history_filtered.is_empty() {
         String::new()
     } else {
         format!(
-            "\n本 session runai 已经看过的 skill（**参考池，用户随时可挑这里的任何一个，没被排除**）：{}\n如果用户当前 prompt 跟这里某个对口（包括 \"换一个 / 有其他的吗 / 找补充\" 这种 follow-up），直接跑 `CLAUDE_SESSION_ID={session_id} runai recommend get <name>` 激活。\n",
+            "\n本 session runai 已经看过的 skill（**参考池，用户随时可挑这里的任何一个，没被排除**）：{}\n如果用户当前 prompt 跟这里某个对口（包括 \"换一个 / 有其他的吗 / 找补充\" 这种 follow-up），直接跑 `curl -s -X POST '{server_url}/skills/get/<name>'{user_header}` 激活。\n",
             history_filtered.join(", ")
         )
     };
@@ -1381,15 +1413,16 @@ fn render_hook_output(
         .collect::<Vec<_>>()
         .join(", ");
     let feedback_protocol_block = format!(
-        "\n反馈协议（被动）：用户明确正向（\"完美 / 好用 / 就这个\"）或负向（\"不对 / 换一个 / 不好用\"）评价时，在回复末尾跑：\n  runai recommend feedback <skill-name> --note \"<场景或原话>\"\n用户没评价就不调用。\n当前推的 skill: {names}\n"
+        "\n反馈协议（被动）：用户明确正向（\"完美 / 好用 / 就这个\"）或负向（\"不对 / 换一个 / 不好用\"）评价时，在回复末尾跑：\n  curl -s -X POST '{server_url}/feedback'{user_header} -H 'Content-Type: application/json' -d '{{\"skill\":\"<skill-name>\",\"note\":\"<场景或原话>\"}}'\n用户没评价就不调用。\n当前推的 skill: {names}\n"
     );
 
     HOOK_OUTPUT_TEMPLATE
         .replace("{MODE}", decision.mode.as_str())
         .replace("{REASONING_BLOCK}", &reasoning_block)
         .replace("{CANDIDATES_BLOCK}", &candidates_block)
-        .replace("{SESSION_ID}", session_id)
         .replace("{ACTIVATION_DIRECTIVE}", &activation_directive)
+        .replace("{SERVER_URL}", server_url)
+        .replace("{USER_HEADER}", user_header)
         .replace("{SESSION_HISTORY_BLOCK}", &session_history_block)
         .replace("{FEEDBACK_PROTOCOL_BLOCK}", &feedback_protocol_block)
 }
@@ -2347,56 +2380,59 @@ mod tests {
         }
     }
 
-    #[test]
-    fn format_empty_skills_returns_empty_string() {
-        assert!(format_for_hook(&decision(RouterMode::Exclusive, vec![])).is_empty());
+    /// Test helper: render hook output with the local-default server URL
+    /// and no user header. The unified template always emits a curl
+    /// command; tests assert on the curl shape.
+    const TEST_SERVER_URL: &str = "http://127.0.0.1:17888";
+    fn fmt(decision: &RouterDecision) -> String {
+        format_for_hook(decision, TEST_SERVER_URL, "")
     }
 
     #[test]
-    fn format_single_match_emits_get_command_not_raw_path() {
-        // Single-skill output never embeds a real filesystem path. The
-        // template references the `runai recommend get` command literally
-        // (placeholder `<skill_name>` for the agent to substitute), and
-        // mentions "SKILL.md" in prose ("stdout 是 SKILL.md 全文") which is
-        // fine — what we forbid is a concrete `/skills/<name>/SKILL.md`
-        // path leaking through.
+    fn format_empty_skills_returns_empty_string() {
+        assert!(fmt(&decision(RouterMode::Exclusive, vec![])).is_empty());
+    }
+
+    #[test]
+    fn format_single_match_emits_curl_not_raw_path() {
+        // Unified-protocol output is always a single curl call against
+        // /skills/get/<name>. No filesystem path may leak; no two
+        // activation shapes — the agent learns one protocol.
         let s = RecommendedSkill {
             name: "figma-alignment".into(),
             description: "align vue/h5 to figma".into(),
         };
-        let out = format_for_hook(&decision(RouterMode::Exclusive, vec![s]));
+        let out = fmt(&decision(RouterMode::Exclusive, vec![s]));
         assert!(
             out.len() < 4_000,
             "pointer-only output must stay short, got {}",
             out.len()
         );
         assert!(out.contains("figma-alignment"));
-        assert!(out.contains("runai recommend get"));
+        assert!(out.contains("curl"));
+        assert!(out.contains("/skills/get/<skill_name>"));
         assert!(
-            !out.contains("/skills/"),
-            "concrete skills-dir path must never appear in hook output"
-        );
-        assert!(
-            !out.contains("Source path"),
-            "no `Source path:` header anywhere"
+            !out.contains("runai recommend get"),
+            "binary-form activation must not appear — protocol is unified to curl"
         );
     }
 
     #[test]
-    fn format_single_match_omits_path_and_body() {
+    fn format_single_match_omits_filesystem_path() {
         let s = RecommendedSkill {
             name: "huge-skill".into(),
             description: "a very large skill".into(),
         };
-        let out = format_for_hook(&decision(RouterMode::Exclusive, vec![s]));
+        let out = fmt(&decision(RouterMode::Exclusive, vec![s]));
         assert!(out.len() < 4_000);
-        assert!(out.contains("runai recommend get"));
+        assert!(out.contains("curl"));
         assert!(out.contains("huge-skill"));
-        assert!(!out.contains("/skills/"));
+        assert!(!out.contains("/Users/"));
+        assert!(!out.contains(".runai/skills/"));
     }
 
     #[test]
-    fn format_exclusive_multi_surfaces_candidates_without_injection() {
+    fn format_exclusive_multi_surfaces_candidates_via_curl() {
         let a = RecommendedSkill {
             name: "figma-alignment".into(),
             description: "align vue to figma".into(),
@@ -2405,16 +2441,16 @@ mod tests {
             name: "figma-component-mapping".into(),
             description: "map figma node to vue component".into(),
         };
-        let out = format_for_hook(&decision(RouterMode::Exclusive, vec![a, b]));
+        let out = fmt(&decision(RouterMode::Exclusive, vec![a, b]));
         assert!(out.contains("- **figma-alignment**"));
         assert!(out.contains("- **figma-component-mapping**"));
-        assert!(out.contains("runai recommend get"));
-        assert!(!out.contains("/skills/"));
-        assert!(!out.contains("Source path"));
+        assert!(out.contains("curl"));
+        assert!(out.contains("/skills/get/"));
+        assert!(!out.contains("runai recommend get"));
     }
 
     #[test]
-    fn format_compatible_multi_lists_all_candidates_via_get_command() {
+    fn format_compatible_multi_lists_all_candidates_via_curl() {
         let a = RecommendedSkill {
             name: "github".into(),
             description: "gh cli wrapper".into(),
@@ -2423,18 +2459,11 @@ mod tests {
             name: "writing-skills".into(),
             description: "write/edit skills".into(),
         };
-        let out = format_for_hook(&decision(RouterMode::Compatible, vec![a, b]));
+        let out = fmt(&decision(RouterMode::Compatible, vec![a, b]));
         assert!(out.contains("github"));
         assert!(out.contains("writing-skills"));
-        assert!(out.contains("runai recommend get"));
-        assert!(
-            !out.contains("/skills/"),
-            "compatible hook must not leak a concrete skills-dir path"
-        );
-        assert!(
-            !out.contains("Source path"),
-            "compatible hook must not emit `Source path:` header"
-        );
+        assert!(out.contains("curl"));
+        assert!(!out.contains("runai recommend get"));
         assert!(out.len() < 10_000);
     }
 
@@ -2449,7 +2478,7 @@ mod tests {
             reasoning: "用户在做 X，建议 alpha".into(),
             skills: vec![s],
         };
-        let out = format_for_hook(&decision_with_reason);
+        let out = fmt(&decision_with_reason);
         assert!(out.contains("router 判断"));
         assert!(out.contains("用户在做 X"));
     }
@@ -2465,9 +2494,27 @@ mod tests {
             name: "alpha".into(),
             description: "test skill".into(),
         };
-        let out = format_for_hook(&decision(RouterMode::Exclusive, vec![s]));
+        let out = fmt(&decision(RouterMode::Exclusive, vec![s]));
         assert!(out.contains("router 判断"));
         assert!(out.contains("格式错误"));
+    }
+
+    #[test]
+    fn format_hook_renders_user_header_in_curl() {
+        // Server-mode rendering: when called with a user header arg, the
+        // curl line must include `-H 'X-Runai-User: ...'` so the server
+        // can session-prefix the request.
+        let s = RecommendedSkill {
+            name: "alpha".into(),
+            description: "test skill".into(),
+        };
+        let out = format_for_hook(
+            &decision(RouterMode::Exclusive, vec![s]),
+            "http://10.0.150.18:17888",
+            " -H 'X-Runai-User: alice@host'",
+        );
+        assert!(out.contains("http://10.0.150.18:17888/skills/get/"));
+        assert!(out.contains("X-Runai-User: alice@host"));
     }
 
     #[test]

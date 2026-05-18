@@ -132,6 +132,8 @@ pub async fn serve(host: &str, port: u16) -> Result<()> {
         // POST their standard hook JSON here and pipe stdout back into the
         // agent. See scripts/runai-client-install.sh for the wrapper they run.
         .route("/recommend", post(handle_recommend))
+        .route("/skills/get/{name}", post(handle_skill_get))
+        .route("/feedback", post(handle_feedback))
         .route("/install", get(handle_install_script))
         .route("/uninstall", get(handle_uninstall_script))
         .with_state(state);
@@ -783,6 +785,16 @@ async fn handle_recommend(headers: HeaderMap, Json(payload): Json<serde_json::Va
         .and_then(|h| h.to_str().ok())
         .unwrap_or("")
         .to_string();
+    // Server-rendered hook output points the agent at THIS server. URL
+    // derived from the request's Host header; falls back to the
+    // dashboard default when missing. User header gets pasted into every
+    // curl call so the server can session-prefix per teammate.
+    let server_url = guess_server_url(&headers);
+    let user_header_arg = if user_prefix.is_empty() {
+        String::new()
+    } else {
+        format!(" -H 'X-Runai-User: {user_prefix}'")
+    };
 
     // recommend() is blocking (reqwest::blocking + rusqlite). Hop onto a
     // blocking thread so the async runtime stays responsive.
@@ -836,6 +848,8 @@ async fn handle_recommend(headers: HeaderMap, Json(payload): Json<serde_json::Va
             &decision,
             sid_opt.unwrap_or(""),
             &history,
+            &server_url,
+            &user_header_arg,
         ))
     })
     .await;
@@ -857,6 +871,129 @@ async fn handle_recommend(headers: HeaderMap, Json(payload): Json<serde_json::Va
 /// GET /install — return the client install bash script with `{SERVER_URL}`
 /// substituted by the URL the request came in on. Teammate runs:
 ///   curl -fsSL http://<server>:<port>/install | bash
+/// Query string for /skills/get/{name}: optional `session_id` used to
+/// session-prefix the adoption row.
+#[derive(Deserialize)]
+struct SkillGetQuery {
+    #[serde(default)]
+    session_id: String,
+}
+
+/// POST /skills/get/{name} — return SKILL.md body + record adoption.
+///
+/// Replaces the local-only `runai recommend get <name>` command for users
+/// who don't have the binary. Side-effects (idempotent):
+///   - record_usage: bumps the skill's usage_count
+///   - record_session_adoption: writes (session_id, skill_name) row
+///
+/// session id = `{X-Runai-User}:{session_id query}` when both present.
+async fn handle_skill_get(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(q): Query<SkillGetQuery>,
+) -> Response {
+    let user_prefix = headers
+        .get("X-Runai-User")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let claude_sid = q.session_id;
+
+    let join = tokio::task::spawn_blocking(move || -> Result<String> {
+        let mgr = SkillManager::new()?;
+        let skill_md = mgr.paths().skills_dir().join(&name).join("SKILL.md");
+        let content = std::fs::read_to_string(&skill_md)
+            .with_context(|| format!("read {}", skill_md.display()))?;
+
+        let _ = mgr.record_usage(&name);
+        let sid_string = match (user_prefix.is_empty(), claude_sid.is_empty()) {
+            (false, false) => format!("{user_prefix}:{claude_sid}"),
+            (false, true) => user_prefix.clone(),
+            (true, false) => claude_sid.clone(),
+            (true, true) => String::new(),
+        };
+        if !sid_string.is_empty() {
+            let _ = mgr.db().record_session_adoption(&sid_string, &name);
+        }
+        Ok(content)
+    })
+    .await;
+
+    match join {
+        Ok(Ok(content)) => (
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            content,
+        )
+            .into_response(),
+        Ok(Err(e)) => {
+            eprintln!("/skills/get: {e:#}");
+            (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                format!("skill not found: {e}\n"),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            eprintln!("/skills/get: spawn_blocking join failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                String::from("internal error\n"),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct FeedbackBody {
+    skill: String,
+    note: String,
+}
+
+/// POST /feedback — replaces `runai recommend feedback`.
+/// Body: `{"skill":"...","note":"..."}`.
+async fn handle_feedback(headers: HeaderMap, Json(req): Json<FeedbackBody>) -> Response {
+    let user_prefix = headers
+        .get("X-Runai-User")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let join = tokio::task::spawn_blocking(move || -> Result<String> {
+        let mgr = SkillManager::new()?;
+        let report = recommend::reevaluate_skill(&mgr, &req.skill, &req.note)?;
+        Ok(format!(
+            "feedback applied by {user_prefix}: {} llm_score {} → {} (summary {} chars)\n",
+            req.skill, report.old_score, report.new_score, report.new_summary_len
+        ))
+    })
+    .await;
+
+    match join {
+        Ok(Ok(s)) => ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], s).into_response(),
+        Ok(Err(e)) => {
+            eprintln!("/feedback: {e:#}");
+            (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                format!("feedback error: {e}\n"),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            eprintln!("/feedback: spawn_blocking join failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                String::from("internal error\n"),
+            )
+                .into_response()
+        }
+    }
+}
+
 async fn handle_install_script(headers: HeaderMap) -> Response {
     let server_url = guess_server_url(&headers);
     let body = CLIENT_INSTALL_SH.replace("{SERVER_URL}", &server_url);

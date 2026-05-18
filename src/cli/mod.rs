@@ -1099,8 +1099,16 @@ fn handle_recommend(
                             .router_session_recommended_skills(sid)
                             .unwrap_or_default()
                     };
-                    let out =
-                        crate::core::recommend::format_for_hook_full(&decision, sid, &history);
+                    // CLI hook path: agent will curl the local dashboard
+                    // server (see core::recommend doc on the unified HTTP
+                    // protocol). No user header — local single-user mode.
+                    let out = crate::core::recommend::format_for_hook_full(
+                        &decision,
+                        sid,
+                        &history,
+                        "http://127.0.0.1:17888",
+                        "",
+                    );
                     if !out.is_empty() {
                         print!("{out}");
                     }

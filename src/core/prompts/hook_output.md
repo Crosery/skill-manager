@@ -6,7 +6,7 @@ runai 推荐 (mode={MODE})
 
 激活方式：每个 skill 跑一次 Bash
 
-  CLAUDE_SESSION_ID={SESSION_ID} runai recommend get <skill_name>
+  curl -s -X POST '{SERVER_URL}/skills/get/<skill_name>'{USER_HEADER}
 
 stdout 是 SKILL.md 全文，按内容执行用户原 prompt。runai 自动记 usage_count 并把当前 session 标记为已推过。
 
