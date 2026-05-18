@@ -38,6 +38,12 @@ const APP_CSS: &str = include_str!("../web/app.css");
 /// See scripts/runai-client-install.sh for the full doc.
 const CLIENT_INSTALL_SH: &str = include_str!("../scripts/runai-client-install.sh");
 const CLIENT_UNINSTALL_SH: &str = include_str!("../scripts/runai-client-uninstall.sh");
+/// Windows / PowerShell variants of install / uninstall scripts. Served
+/// from GET /install.ps1 + /uninstall.ps1 so teammates on Windows can run
+/// `irm http://<server>/install.ps1 | iex` (PowerShell equivalent of
+/// `curl ... | bash`). Same {SERVER_URL} placeholder substitution.
+const CLIENT_INSTALL_PS1: &str = include_str!("../scripts/runai-client-install.ps1");
+const CLIENT_UNINSTALL_PS1: &str = include_str!("../scripts/runai-client-uninstall.ps1");
 
 /// Shared state for handlers. Holds only the DB path (and AppPaths if needed
 /// later for other resources) — rusqlite `Connection` is `!Sync`, so each
@@ -143,6 +149,8 @@ pub async fn serve(host: &str, port: u16) -> Result<()> {
         .route("/feedback", post(handle_feedback))
         .route("/install", get(handle_install_script))
         .route("/uninstall", get(handle_uninstall_script))
+        .route("/install.ps1", get(handle_install_ps1))
+        .route("/uninstall.ps1", get(handle_uninstall_ps1))
         .with_state(state);
 
     let addr: SocketAddr = format!("{host}:{port}")
@@ -1142,6 +1150,23 @@ async fn handle_uninstall_script() -> Response {
     (
         [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
         CLIENT_UNINSTALL_SH.to_string(),
+    )
+        .into_response()
+}
+
+/// GET /install.ps1 — Windows / PowerShell install. Teammate runs:
+///   irm http://<server>:<port>/install.ps1 | iex
+async fn handle_install_ps1(headers: HeaderMap) -> Response {
+    let server_url = guess_server_url(&headers);
+    let body = CLIENT_INSTALL_PS1.replace("{SERVER_URL}", &server_url);
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
+}
+
+/// GET /uninstall.ps1 — Windows / PowerShell uninstall.
+async fn handle_uninstall_ps1() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        CLIENT_UNINSTALL_PS1.to_string(),
     )
         .into_response()
 }
