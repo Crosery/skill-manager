@@ -671,15 +671,21 @@ pub fn recommend(
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
-        // CLI / library callers (cli/mod.rs `recommend`) default to the
-        // local dashboard server URL. The server endpoint path
-        // (server::handle_recommend) overrides via its own call to
-        // format_for_hook_full with server_url + user_header.
+        // CLI / library callers default to RUNAI_SERVER env var (set by
+        // client-install scripts or user shell rc to a LAN server URL),
+        // falling back to the local dashboard which `runai server --ensure`
+        // keeps running. The server endpoint path
+        // (server::handle_recommend) overrides via its own call with the
+        // request-derived server_url + user_header.
+        let local_server_url = std::env::var("RUNAI_SERVER")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "http://127.0.0.1:17888".to_string());
         format_for_hook_full(
             &decision,
             session_id.unwrap_or(""),
             &history,
-            "http://127.0.0.1:17888",
+            &local_server_url,
             "",
         )
     } else {

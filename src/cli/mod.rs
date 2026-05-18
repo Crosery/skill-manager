@@ -1099,14 +1099,23 @@ fn handle_recommend(
                             .router_session_recommended_skills(sid)
                             .unwrap_or_default()
                     };
-                    // CLI hook path: agent will curl the local dashboard
-                    // server (see core::recommend doc on the unified HTTP
-                    // protocol). No user header — local single-user mode.
+                    // CLI hook path: hook output uses the unified HTTP
+                    // protocol — the agent will curl `${server_url}/...`.
+                    // server_url precedence:
+                    //   1. RUNAI_SERVER env var (set by client-install
+                    //      script or user shell rc — usually points at a
+                    //      remote thunder-style server)
+                    //   2. fallback "http://127.0.0.1:17888" — the local
+                    //      dashboard which `runai server --ensure` keeps
+                    //      running so the agent can always curl it.
+                    // No X-Runai-User header in local mode (single user).
+                    let local_server_url = std::env::var("RUNAI_SERVER")
+                        .unwrap_or_else(|_| "http://127.0.0.1:17888".to_string());
                     let out = crate::core::recommend::format_for_hook_full(
                         &decision,
                         sid,
                         &history,
-                        "http://127.0.0.1:17888",
+                        &local_server_url,
                         "",
                     );
                     if !out.is_empty() {

@@ -133,6 +133,12 @@ pub async fn serve(host: &str, port: u16) -> Result<()> {
         // agent. See scripts/runai-client-install.sh for the wrapper they run.
         .route("/recommend", post(handle_recommend))
         .route("/skills/get/{name}", post(handle_skill_get))
+        // GET /skills/file/{name}/{*path} — raw file body for any path
+        // inside a skill directory. Acts as a Read-tool replacement so
+        // remote teammates can fetch references/X.md, scripts/Y.py, etc.
+        // referenced from SKILL.md without having the binary or the
+        // skill files on disk locally.
+        .route("/skills/file/{name}/{*path}", get(handle_skill_file))
         .route("/feedback", post(handle_feedback))
         .route("/install", get(handle_install_script))
         .route("/uninstall", get(handle_uninstall_script))
@@ -899,9 +905,17 @@ async fn handle_skill_get(
         .to_string();
     let claude_sid = q.session_id;
 
+    let server_url_for_get = guess_server_url(&headers);
+    let user_header_arg = if user_prefix.is_empty() {
+        String::new()
+    } else {
+        format!(" -H 'X-Runai-User: {user_prefix}'")
+    };
+
     let join = tokio::task::spawn_blocking(move || -> Result<String> {
         let mgr = SkillManager::new()?;
-        let skill_md = mgr.paths().skills_dir().join(&name).join("SKILL.md");
+        let skill_dir = mgr.paths().skills_dir().join(&name);
+        let skill_md = skill_dir.join("SKILL.md");
         let content = std::fs::read_to_string(&skill_md)
             .with_context(|| format!("read {}", skill_md.display()))?;
 
@@ -915,7 +929,29 @@ async fn handle_skill_get(
         if !sid_string.is_empty() {
             let _ = mgr.db().record_session_adoption(&sid_string, &name);
         }
-        Ok(content)
+
+        // List sibling files inside the skill directory so the remote
+        // agent knows what `references/X.md` / `scripts/Y.py` exist and
+        // how to curl them — server-mode equivalent of having the skill
+        // dir on disk where the agent could `Read` siblings.
+        let mut sibling_entries: Vec<String> = Vec::new();
+        let _ = walk_skill_dir_plain(&skill_dir, &skill_dir, &mut sibling_entries);
+        sibling_entries.sort();
+        sibling_entries.retain(|p| p != "SKILL.md");
+
+        let appendix = if sibling_entries.is_empty() {
+            String::new()
+        } else {
+            let mut buf = String::from("\n\n---\n附加文件（按需取，curl 替代 Read）：\n");
+            for rel in &sibling_entries {
+                buf.push_str(&format!(
+                    "  curl -s '{server_url_for_get}/skills/file/{name}/{rel}'{user_header_arg}\n"
+                ));
+            }
+            buf
+        };
+
+        Ok(format!("{content}{appendix}"))
     })
     .await;
 
@@ -936,6 +972,100 @@ async fn handle_skill_get(
         }
         Err(e) => {
             eprintln!("/skills/get: spawn_blocking join failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                String::from("internal error\n"),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Recursive directory walk that yields all non-hidden file paths
+/// relative to `root`, as forward-slash strings. Errors are swallowed
+/// per-entry so a single unreadable file doesn't kill the whole listing.
+/// Plain anyhow::Result so it can be called from inside the
+/// spawn_blocking closure (the ApiError-flavoured `walk_skill_dir` above
+/// is the dashboard variant).
+fn walk_skill_dir_plain(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    let read = std::fs::read_dir(dir)?;
+    for entry in read.flatten() {
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let fname_str = file_name.to_string_lossy();
+        if fname_str.starts_with('.') {
+            continue;
+        }
+        let md = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if md.is_dir() {
+            let _ = walk_skill_dir_plain(root, &path, out);
+        } else if md.is_file() {
+            if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// GET /skills/file/{name}/{*path} — return the raw bytes of a file
+/// inside a managed skill's directory. The "curl-as-Read" primitive:
+/// remote teammates without the binary or the skill on disk can fetch
+/// references/X.md, scripts/Y.py, templates/Z.html the same way Claude
+/// Code's Read tool would on a machine that has the file locally.
+///
+/// SECURITY: canonicalise both the skill_dir root and the joined target,
+/// and refuse anything that escapes the skill_dir. Prevents
+/// `..%2f..%2fetc%2fpasswd`-style traversal.
+async fn handle_skill_file(Path((name, sub_path)): Path<(String, String)>) -> Response {
+    let join = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, &'static str)> {
+        let mgr = SkillManager::new()?;
+        let skill_dir = mgr.paths().skills_dir().join(&name);
+        let target = skill_dir.join(&sub_path);
+        let root_real = skill_dir
+            .canonicalize()
+            .with_context(|| format!("canonicalize {}", skill_dir.display()))?;
+        let target_real = target
+            .canonicalize()
+            .with_context(|| format!("canonicalize {}", target.display()))?;
+        if !target_real.starts_with(&root_real) {
+            bail!("path escapes skill dir: {sub_path}");
+        }
+        let md = target_real.metadata()?;
+        if !md.is_file() {
+            bail!("not a file: {sub_path}");
+        }
+        let bytes = std::fs::read(&target_real)?;
+        let ct = if is_text_path(&target_real) {
+            "text/plain; charset=utf-8"
+        } else {
+            "application/octet-stream"
+        };
+        Ok((bytes, ct))
+    })
+    .await;
+
+    match join {
+        Ok(Ok((bytes, ct))) => ([(header::CONTENT_TYPE, ct)], bytes).into_response(),
+        Ok(Err(e)) => {
+            eprintln!("/skills/file: {e:#}");
+            (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                format!("not found: {e}\n"),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            eprintln!("/skills/file: spawn_blocking join failed: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -1015,11 +1145,24 @@ async fn handle_uninstall_script() -> Response {
         .into_response()
 }
 
-/// Reconstruct the URL the teammate curl'd from so the install script ends
-/// up hard-coded with the same `http://host:port` they used. Falls back to
-/// the `Host` header (curl always sets this); scheme defaults to `http`
-/// since there's no TLS in front of runai by default — LAN deploys.
+/// Reconstruct the server URL the teammate curl'd from so rendered hook
+/// outputs and install scripts hard-code the same `http://host:port`.
+///
+/// Precedence:
+///   1. `RUNAI_PUBLIC_URL` env var — admin-set fixed public URL. Use this
+///      on a deployed server (e.g. `RUNAI_PUBLIC_URL=http://10.0.150.18:17888`)
+///      so the rendered URL is always the LAN-reachable address, even when
+///      a request comes in over 127.0.0.1 / localhost (local healthcheck).
+///   2. `Host` request header + `X-Forwarded-Proto` (if behind a reverse
+///      proxy). curl always sets Host so this is the normal LAN path.
+///   3. Fallback `http://127.0.0.1:17888`.
 fn guess_server_url(headers: &HeaderMap) -> String {
+    if let Ok(env_url) = std::env::var("RUNAI_PUBLIC_URL") {
+        let trimmed = env_url.trim().trim_end_matches('/');
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
