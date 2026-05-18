@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/images/runai-hero.png" alt="runai" width="100%" />
+<img src="docs/images/runai-logo.png" alt="runai" width="180" />
 
 # runai
 
@@ -34,7 +34,7 @@
 
 ## 架构一览
 
-<img src="docs/images/runai-architecture.png" alt="runai architecture" width="60%" />
+<img src="docs/images/runai-architecture.png" alt="runai architecture" width="100%" />
 
 </div>
 
