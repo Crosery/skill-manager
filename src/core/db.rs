@@ -698,6 +698,37 @@ impl Database {
         Ok(order)
     }
 
+    /// Return (llm_input, llm_raw_response) pairs for every successful
+    /// router call in this session, ordered by ts ASC. Used by the
+    /// Conversation `session_mode` to rebuild a chat-history messages
+    /// array fed back to the router LLM. Limit caps cost — at default
+    /// 30 turns the conversation payload stays bounded.
+    pub fn router_session_turn_history(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        if session_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT llm_input, llm_raw_response FROM router_events
+             WHERE session_id = ?1 AND status = 'ok'
+             ORDER BY ts ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![session_id, limit as i64], |r| {
+            let i: String = r.get(0)?;
+            let o: String = r.get(1)?;
+            Ok((i, o))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Record that a skill was adopted (Read + acted on by the main agent)
     /// in a given Claude Code session. Called by `runai recommend used`.
     /// Idempotent: PRIMARY KEY (session_id, skill_name) collapses repeated

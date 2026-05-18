@@ -44,15 +44,15 @@ const HISTORY_PREFIX_TEMPLATE: &str = include_str!("prompts/recommend_history_pr
 const ALREADY_ROUTED_TEMPLATE: &str = include_str!("prompts/recommend_already_routed.md");
 const CWD_PREFIX_TEMPLATE: &str = include_str!("prompts/recommend_cwd_prefix.md");
 const PROJECT_CONTEXT_TEMPLATE: &str = include_str!("prompts/recommend_project_context.md");
-const HOOK_POINTER_TEMPLATE: &str = include_str!("prompts/hook_pointer.md");
-const HOOK_MULTI_TEMPLATE: &str = include_str!("prompts/hook_multi.md");
+const HOOK_OUTPUT_TEMPLATE: &str = include_str!("prompts/hook_output.md");
 
 /// Mode tag returned by the router on the first line of its output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RouterMode {
     /// Skills in this set can be loaded together (e.g. github + writing-skills).
     Compatible,
     /// Skills are mutually exclusive — user must pick one (e.g. multiple image gen providers).
+    #[default]
     Exclusive,
 }
 
@@ -81,10 +81,53 @@ pub struct RecommendConfig {
     /// like "中文 + 英文关键词" that the LLM will follow literally.
     #[serde(default = "default_summary_lang")]
     pub summary_lang: String,
+    /// Whether the router LLM sees prior turns of this Claude Code session.
+    /// Default `Oneshot` — see [`SessionMode`] for the trade-off.
+    #[serde(default)]
+    pub session_mode: SessionMode,
+    /// Max prior turns to replay in `Conversation` mode. Older turns get
+    /// dropped to keep request size bounded. 0 disables history (= Oneshot
+    /// behaviour even when mode is Conversation).
+    #[serde(default = "default_session_history_limit")]
+    pub session_history_limit: usize,
 }
 
 fn default_summary_lang() -> String {
     "zh".to_string()
+}
+
+fn default_session_history_limit() -> usize {
+    20
+}
+
+/// How the router LLM sees this session's earlier turns.
+///
+/// `Oneshot` (default): every `recommend` call is independent. Only the
+/// current user prompt + candidate list goes to the LLM. Cheapest and
+/// fastest (DeepSeek prefix-cache fully hits the system + candidate prefix
+/// because nothing else varies turn-to-turn).
+///
+/// `Conversation`: pull prior `(llm_input, llm_raw_response)` pairs from
+/// `router_events` for this session and prepend them as alternating
+/// user/assistant messages. Lets the LLM remember "I already pushed X
+/// earlier" and proactively re-recommend a previously-shown skill when the
+/// user's current prompt finally matches it. More tokens per call as the
+/// session grows; prefix-cache only hits the leading static portion.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionMode {
+    #[default]
+    Oneshot,
+    Conversation,
+}
+
+/// A single prior router round-trip — the exact `user_msg` we sent and the
+/// exact `assistant` text the LLM produced. Used to rebuild a chat-history
+/// messages array in `SessionMode::Conversation`.
+#[derive(Debug, Clone)]
+pub struct RouterTurn {
+    pub user: String,
+    pub assistant: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,9 +150,17 @@ impl Default for RecommendConfig {
             base_url: "https://api.deepseek.com/v1".into(),
             model: "deepseek-v4-flash".into(),
             api_key: String::new(),
-            top_k: 3,
+            // Upper bound on how many skills the router is allowed to surface
+            // in a single decision. 8 is the soft ceiling — COMPATIBLE workflow
+            // prompts often want 4-6 互补 skills (emulator + adb + cdp + figma…),
+            // EXCLUSIVE picks 1-3 candidates for the user to choose from. 8 is
+            // large enough that the router never feels constrained, small
+            // enough that hook output stays well under Claude Code's 10 KB cap.
+            top_k: 8,
             min_prompt_len: 0,
             summary_lang: default_summary_lang(),
+            session_mode: SessionMode::default(),
+            session_history_limit: default_session_history_limit(),
         }
     }
 }
@@ -166,21 +217,24 @@ impl RecommendConfig {
     }
 }
 
-/// A single recommended skill. For the primary pick, `content` holds the full
-/// SKILL.md text. For alternates, `content` is empty (only `name` + `description`
-/// are surfaced so the main agent can ask the user which to load).
+/// A single recommended skill. The router never sends the SKILL.md body or
+/// path to the main agent — activation flows exclusively through
+/// `runai recommend get <name>`, so all we ship is the human-readable name
+/// and a short description for the candidate list.
 #[derive(Debug, Clone)]
 pub struct RecommendedSkill {
     pub name: String,
     pub description: String,
-    pub path: PathBuf,
-    pub content: String,
 }
 
-/// Full router output: the mode tag plus the ranked skill list.
-#[derive(Debug, Clone)]
+/// Full router output: the mode tag, a short reasoning sentence the router
+/// LLM produced ("why this set"), and the ranked skill list. `reasoning`
+/// can be empty when the LLM omitted the line — the renderer just hides
+/// the block in that case.
+#[derive(Debug, Clone, Default)]
 pub struct RouterDecision {
     pub mode: RouterMode,
+    pub reasoning: String,
     pub skills: Vec<RecommendedSkill>,
 }
 
@@ -203,12 +257,14 @@ pub fn recommend(
     if !cfg.enabled {
         return Ok(RouterDecision {
             mode: RouterMode::Exclusive,
+            reasoning: String::new(),
             skills: Vec::new(),
         });
     }
     if user_prompt.trim().chars().count() < cfg.min_prompt_len {
         return Ok(RouterDecision {
             mode: RouterMode::Exclusive,
+            reasoning: String::new(),
             skills: Vec::new(),
         });
     }
@@ -219,39 +275,6 @@ pub fn recommend(
         cfg.effective_api_key()
             .context("recommend api_key not configured: run `runai recommend setup` or set RUNAI_RECOMMEND_API_KEY")?
     };
-
-    // ── Verified-adoption reconciliation ────────────────────────────────
-    // Before deciding what to recommend this turn, scan the transcript for
-    // `Read` tool calls hitting any `<skills_dir>/<name>/SKILL.md`. That's
-    // the ground-truth "the main agent actually opened this skill" signal —
-    // Claude Code wrote it into the jsonl, not something the agent
-    // self-reports, so it can't be faked or forgotten.
-    //
-    // For every newly-seen adoption (not already in this session's
-    // adoptions table), bump usage_count and record the session adoption.
-    // This makes the dashboard's per-skill usage count reflect real Read
-    // activity, and makes the session dedup logic suppress only skills
-    // that were actually opened (not merely offered).
-    if let (Some(sid), Some(tpath)) = (session_id, transcript_path) {
-        if !sid.is_empty() {
-            let adopted = transcript_adopted_skills(tpath, &mgr.paths().skills_dir());
-            if !adopted.is_empty() {
-                let already: std::collections::HashSet<String> = mgr
-                    .db()
-                    .router_session_routed_skills(sid)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect();
-                for name in &adopted {
-                    if already.contains(name) {
-                        continue;
-                    }
-                    let _ = mgr.record_usage(name);
-                    let _ = mgr.db().record_session_adoption(sid, name);
-                }
-            }
-        }
-    }
 
     // `already_routed` is the dedup signal handed to the router LLM. It is
     // the **full** recommendation history this session (every skill the
@@ -278,6 +301,7 @@ pub fn recommend(
     if all_candidates.is_empty() {
         return Ok(RouterDecision {
             mode: RouterMode::Exclusive,
+            reasoning: String::new(),
             skills: Vec::new(),
         });
     }
@@ -334,9 +358,27 @@ pub fn recommend(
             None
         }
     };
-    let bm25_input_query: String = match &expanded_query {
-        Some(expanded) => format!("{user_prompt} {expanded}"),
-        None => user_prompt.to_string(),
+    // Stitch recent user-turn history into the BM25 query. Short follow-up
+    // prompts like "不对换一个" / "有没有其他的" carry zero keywords on
+    // their own — the topic ("ppt", "debug", whatever) lives in earlier
+    // user turns. Without history, topical skills get filtered out of the
+    // top-K before the LLM router ever sees them. Assistant turns are not
+    // stitched: they're prior router output and would self-bias the
+    // prefilter toward whatever the agent just talked about.
+    let bm25_history_recall = transcript_path
+        .map(|p| recent_user_prompts_for_bm25(p, 3))
+        .unwrap_or_default();
+
+    let bm25_input_query: String = {
+        let base = match &expanded_query {
+            Some(expanded) => format!("{user_prompt} {expanded}"),
+            None => user_prompt.to_string(),
+        };
+        if bm25_history_recall.is_empty() {
+            base
+        } else {
+            format!("{base} {bm25_history_recall}")
+        }
     };
 
     let q_terms = bm25::tokenize(&bm25_input_query);
@@ -535,14 +577,33 @@ pub fn recommend(
         .replace("{USER_PROMPT}", user_prompt)
         .replace("{TOP_K}", &cfg.top_k.to_string());
 
+    // Build conversation history when this session has prior turns AND
+    // Conversation mode is on. Oneshot keeps history empty regardless.
+    let history_turns: Vec<RouterTurn> = match (cfg.session_mode, session_id) {
+        (SessionMode::Conversation, Some(sid))
+            if !sid.is_empty() && cfg.session_history_limit > 0 =>
+        {
+            mgr.db()
+                .router_session_turn_history(sid, cfg.session_history_limit)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(user, assistant)| RouterTurn { user, assistant })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
     let started = Instant::now();
-    let call_result = call_router(&cfg, &api_key, &user_msg);
+    let call_result = call_router(&cfg, &api_key, &user_msg, &history_turns);
     let latency_ms = started.elapsed().as_millis() as i64;
 
-    let (mode, chosen_names, stats, status, error_msg, llm_raw) = match call_result {
-        Ok((mode, names, stats, raw)) => (mode, names, stats, "ok".to_string(), None, raw),
+    let (mode, reasoning, chosen_names, stats, status, error_msg, llm_raw) = match call_result {
+        Ok((mode, reasoning, names, stats, raw)) => {
+            (mode, reasoning, names, stats, "ok".to_string(), None, raw)
+        }
         Err(e) => (
             RouterMode::Exclusive,
+            String::new(),
             Vec::new(),
             RouterCallStats::default(),
             "error".to_string(),
@@ -579,23 +640,11 @@ pub fn recommend(
         candidates.iter().map(|r| (r.name.clone(), r)).collect();
 
     let mut out = Vec::new();
-    for (idx, name) in chosen_names.iter().enumerate() {
+    for name in chosen_names.iter() {
         if let Some(r) = by_name.get(name) {
-            let skill_md = mgr.paths().skills_dir().join(&r.name).join("SKILL.md");
-            let content = if idx == 0 {
-                match fs::read_to_string(&skill_md) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                }
-            } else {
-                String::new()
-            };
             // Prefer the AI-generated summary (bilingual, structured
             // task/triggers/inputs/outputs/not-for, 6 lines) over the raw
-            // crowdsourced description: it's higher signal density and was
-            // written specifically to help the router LLM + main agent
-            // recognise when the skill applies. Falls back to the
-            // description for skills that haven't been enriched yet.
+            // crowdsourced description — higher signal density.
             let desc_for_agent = match summaries.get(&r.name) {
                 Some(s) if !s.is_empty() => s.clone(),
                 _ => r.description.clone(),
@@ -603,12 +652,14 @@ pub fn recommend(
             out.push(RecommendedSkill {
                 name: r.name.clone(),
                 description: desc_for_agent,
-                path: skill_md,
-                content,
             });
         }
     }
-    let decision = RouterDecision { mode, skills: out };
+    let decision = RouterDecision {
+        mode,
+        reasoning: reasoning.clone(),
+        skills: out,
+    };
     let hook_output = if status == "ok" {
         // Pull this session's previous recommendations so the hook output
         // can remind the main agent which skills it already saw — cuts
@@ -660,22 +711,10 @@ pub fn recommend(
     };
     let _ = mgr.db().insert_router_event(&ev);
 
-    // Bump usage_count only when the SKILL.md body is actually inlined into
-    // Claude Code's prompt this turn (= the main agent definitely consumed
-    // it). Single-skill mode is intentionally NOT counted any more: the
-    // hook only sends a pointer + description now, so the main agent has to
-    // decide whether to Read the SKILL.md — until it does, "推荐" ≠ "采用".
-    // For accurate single-skill adoption tracking, the main agent's Read
-    // event would have to feed back here; that signal isn't wired yet.
-    //
-    // Counted paths:
-    //   - Compatible multi where the SKILL.md body is inlined → all skills
-    //     in the set are pushed to the agent, count each.
-    if ev.status == "ok" && decision.mode == RouterMode::Compatible && decision.skills.len() > 1 {
-        for s in &decision.skills {
-            let _ = mgr.record_usage(&s.name);
-        }
-    }
+    // usage_count and session-adoption are bumped exclusively by
+    // `runai recommend get <skill>` invoked from the main agent (see
+    // src/cli/mod.rs Get handler). Recommending ≠ adopting — the router
+    // never bumps counts on its own, no matter the mode.
 
     if let Some(err) = error_msg {
         bail!(err);
@@ -1174,9 +1213,12 @@ fn parse_enrich_response(raw: &str) -> (String, i64) {
 /// Dedicated summarisation LLM call. Reuses the configured backend but with
 /// a tighter timeout (no thinking, short output) and returns the raw text.
 fn call_summary_llm(cfg: &RecommendConfig, api_key: &str, user_msg: &str) -> Result<String> {
+    // Enrich passes are always oneshot — they index a single SKILL.md
+    // without conversational state, so no history is ever threaded.
+    let no_history: &[RouterTurn] = &[];
     let (raw, _stats) = match cfg.provider {
-        Provider::OpenaiCompat => call_openai_compat(cfg, api_key, user_msg)?,
-        Provider::Anthropic => call_anthropic(cfg, api_key, user_msg)?,
+        Provider::OpenaiCompat => call_openai_compat(cfg, api_key, user_msg, no_history)?,
+        Provider::Anthropic => call_anthropic(cfg, api_key, user_msg, no_history)?,
         Provider::ClaudeCli => call_claude_cli(cfg, user_msg)?,
     };
     Ok(raw)
@@ -1242,87 +1284,40 @@ fn write_last_recommend(paths: &AppPaths, decision: &RouterDecision) {
     }
 }
 
-/// Format a COMPATIBLE multi-skill set. Each skill becomes its own inline
-/// block if its content fits the per-skill budget; otherwise it shows as a
-/// pointer line telling the main agent to Read once. The total output is hard
-/// capped at 9 KB to stay under Claude Code's 10 KB UserPromptSubmit cap.
-fn format_compatible_set(skills: &[RecommendedSkill]) -> String {
-    const HARD_BUDGET: usize = 9000;
-    const PER_SKILL_INLINE_LIMIT: usize = 4000;
-
-    let mut buf = String::new();
-    buf.push_str("# Skill recommendations (runai recommend)\n\n");
-    buf.push_str(
-        "**Compatible skill set — these skills can be combined; load them all and use as needed.** Start your reply with one short line listing the activated skills, e.g. `激活 skills: a, b, c`. Then follow the inlined SKILL.md content directly. For any skill below shown as `(too large — Read once)`, Read its path exactly once.\n\n\
-         **These skills are already loaded for this turn via runai's UserPromptSubmit hook.** Do NOT call `sm_enable` / `sm_install` / `runai enable` / `runai install` / any 'activate' or 'install' tool — the SKILL.md content / paths below ARE the activation. Even if `sm_list` shows any of them as 'disabled', that only affects future sessions; for this turn they are usable.\n\n",
-    );
-    buf.push_str(&format!(
-        "激活 skills: {}\n\n",
-        skills
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
-
-    for s in skills {
-        let header = format!("---\n## {}\nSource path: `{}`\n", s.name, s.path.display());
-        if buf.len() + header.len() > HARD_BUDGET {
-            buf.push_str(&format!(
-                "\n(Remaining skills omitted to stay under 10 KB hook cap. Read these one-by-one as needed: {})\n",
-                skills
-                    .iter()
-                    .skip_while(|x| x.name != s.name)
-                    .map(|x| x.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-            break;
-        }
-        buf.push_str(&header);
-        if !s.content.is_empty()
-            && s.content.len() <= PER_SKILL_INLINE_LIMIT
-            && buf.len() + s.content.len() < HARD_BUDGET
-        {
-            buf.push('\n');
-            buf.push_str(&s.content);
-            if !s.content.ends_with('\n') {
-                buf.push('\n');
-            }
-        } else {
-            buf.push_str(&format!(
-                "(too large — Read once at the path above; what it does: {})\n",
-                s.description.chars().take(160).collect::<String>()
-            ));
-        }
-    }
-    buf
-}
-
-/// Format recommended skills as the `UserPromptSubmit` hook stdout text.
-/// Output is plain markdown; Claude Code injects hook stdout as additional
-/// context before the user prompt.
+/// Format the router decision as the `UserPromptSubmit` hook stdout. Single
+/// unified template (`hook_output.md`) — no per-mode branches, no path or
+/// SKILL.md body anywhere, no negative phrasing. The main agent always sees
+/// the same shape: candidate list + the one activation command + a mode-
+/// specific directive on how to pick.
+///
+/// `session_history` holds skill names the router has already proposed
+/// earlier in this Claude Code session. It's rendered as a session-recall
+/// block so the main agent can spot "router pushed X earlier, this prompt
+/// finally matches" without the user having to repeat themselves.
 pub fn format_for_hook(decision: &RouterDecision) -> String {
-    format_for_hook_with_session(decision, "")
+    render_hook_output(decision, "", &[])
 }
 
-/// Same as `format_for_hook` but also templates `{SESSION_ID}` into the
-/// pointer prompt so the main agent can issue
-/// `CLAUDE_SESSION_ID=<sid> runai recommend used <skill>` when it adopts
-/// the recommendation. Empty `session_id` yields a literal `{SESSION_ID}`
-/// placeholder which the agent will just leave un-set — adoption then
-/// bumps usage_count without per-session dedup.
+/// Same as `format_for_hook` but with an explicit Claude Code session id
+/// substituted into the activation command. Empty `session_id` yields a
+/// literal `{SESSION_ID}` placeholder; `runai recommend get` reads
+/// `CLAUDE_SESSION_ID` from env, so an absent id just means no per-session
+/// dedup.
 pub fn format_for_hook_with_session(decision: &RouterDecision, session_id: &str) -> String {
-    format_for_hook_full(decision, session_id, &[])
+    render_hook_output(decision, session_id, &[])
 }
 
-/// Full-control variant: same as `format_for_hook_with_session` but also
-/// renders a "this session already saw these skills" reminder at the end so
-/// the main agent doesn't re-discuss skills it already considered. The
-/// list comes from `router_session_recommended_skills(sid)` and contains
-/// every skill the router has proposed in this session, newest-first,
-/// excluding the ones in the current decision (those are obviously fresh).
+/// Full variant: also renders this-session recall (`session_history` from
+/// `router_session_recommended_skills`).
 pub fn format_for_hook_full(
+    decision: &RouterDecision,
+    session_id: &str,
+    session_history: &[String],
+) -> String {
+    render_hook_output(decision, session_id, session_history)
+}
+
+fn render_hook_output(
     decision: &RouterDecision,
     session_id: &str,
     session_history: &[String],
@@ -1332,40 +1327,33 @@ pub fn format_for_hook_full(
         return String::new();
     }
 
-    let body = if skills.len() > 1 && decision.mode == RouterMode::Compatible {
-        format_compatible_set(skills)
-    } else if skills.len() == 1 {
-        // Single-skill: emit pointer + description only. Never inline the
-        // SKILL.md body. The main agent decides whether to Read the file —
-        // hook output stays under ~1 KB regardless of skill size, and a
-        // mismatched recommendation no longer pollutes the agent's context
-        // with several KB of irrelevant SKILL.md text.
-        let primary = &skills[0];
-        let desc_short: String = primary.description.chars().take(300).collect();
-        HOOK_POINTER_TEMPLATE
-            .replace("{NAME}", &primary.name)
-            .replace("{PATH}", &primary.path.display().to_string())
-            .replace("{DESC}", &desc_short)
-            .replace("{SESSION_ID}", session_id)
-    } else {
-        let candidates: String = skills
-            .iter()
-            .map(|s| format!("- **{}** — {}", s.name, s.description))
-            .collect::<Vec<_>>()
-            .join("\n");
-        HOOK_MULTI_TEMPLATE
-            .replace("{CANDIDATES}", &candidates)
-            .replace("{SESSION_ID}", session_id)
+    let candidates_block: String = skills
+        .iter()
+        .map(|s| format!("- **{}** — {}", s.name, s.description))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let activation_directive = match (decision.mode, skills.len()) {
+        (RouterMode::Exclusive, 1) => "对口就跑命令激活；不对口忽略即可。".to_string(),
+        (RouterMode::Exclusive, _) => {
+            "一句话让用户挑（单选或多选都行），用户挑完对每个选中的 skill 各跑一次 get 命令。"
+                .to_string()
+        }
+        (RouterMode::Compatible, _) => {
+            "互补激活：对每个候选 skill 各跑一次 get 命令，跑完立即组合执行用户原 prompt。"
+                .to_string()
+        }
     };
 
-    // Append session-history reminder + feedback protocol.
-    let names = skills
-        .iter()
-        .map(|s| s.name.as_str())
-        .collect::<Vec<_>>()
-        .join(" | ");
-    // Filter out skills currently being recommended — they're obviously
-    // already on the agent's screen, no point re-listing them as history.
+    let reasoning_block = if decision.reasoning.trim().is_empty() {
+        String::new()
+    } else {
+        format!("router 判断：{}\n\n", decision.reasoning.trim())
+    };
+
+    // Session-recall list: names the router has shown earlier in this
+    // session, minus the ones currently on screen. The wording is plain
+    // positive — no "don't Read", no "path not exposed".
     let current: std::collections::HashSet<&str> = skills.iter().map(|s| s.name.as_str()).collect();
     let history_filtered: Vec<&str> = session_history
         .iter()
@@ -1373,24 +1361,32 @@ pub fn format_for_hook_full(
         .filter(|n| !current.contains(n))
         .take(10)
         .collect();
-    let history_line = if history_filtered.is_empty() {
+    let session_history_block = if history_filtered.is_empty() {
         String::new()
     } else {
         format!(
-            "\n本 session 之前 runai 已经推过这些 skill（候选名你已经看过，没 Read 过 SKILL.md）: {}\n如果当前 prompt 跟其中某个对口，直接跑 `CLAUDE_SESSION_ID={session_id} runai recommend get <name>` 激活，**不要用 Read 工具找路径** —— runai 不公开路径。",
+            "\n本 session runai 已经看过的 skill（**参考池，用户随时可挑这里的任何一个，没被排除**）：{}\n如果用户当前 prompt 跟这里某个对口（包括 \"换一个 / 有其他的吗 / 找补充\" 这种 follow-up），直接跑 `CLAUDE_SESSION_ID={session_id} runai recommend get <name>` 激活。\n",
             history_filtered.join(", ")
         )
     };
-    let footer = format!(
-        "\n\n---{history_line}\n\n\
-        **反馈协议（被动触发）**: 只有当用户**明确**评价这次推荐时才执行下面的命令，**不要主动每轮都调用**。\n\
-        - 用户表达负面（\"不对\"/\"换一个\"/\"不好用\"/\"再试别的\"）→ 在你回复末尾跑：\n\
-          `runai recommend feedback <skill-name> --note \"<复述用户原话或场景描述>\"`\n\
-        - 用户表达正面（\"完美\"/\"就这个\"/\"好用\"）→ 同样跑上面命令，note 写正面反馈\n\
-        - 用户没评价 → 不要调用\n\
-        当前推的 skill: {names}\n",
+
+    let names = skills
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let feedback_protocol_block = format!(
+        "\n反馈协议（被动）：用户明确正向（\"完美 / 好用 / 就这个\"）或负向（\"不对 / 换一个 / 不好用\"）评价时，在回复末尾跑：\n  runai recommend feedback <skill-name> --note \"<场景或原话>\"\n用户没评价就不调用。\n当前推的 skill: {names}\n"
     );
-    body + &footer
+
+    HOOK_OUTPUT_TEMPLATE
+        .replace("{MODE}", decision.mode.as_str())
+        .replace("{REASONING_BLOCK}", &reasoning_block)
+        .replace("{CANDIDATES_BLOCK}", &candidates_block)
+        .replace("{SESSION_ID}", session_id)
+        .replace("{ACTIVATION_DIRECTIVE}", &activation_directive)
+        .replace("{SESSION_HISTORY_BLOCK}", &session_history_block)
+        .replace("{FEEDBACK_PROTOCOL_BLOCK}", &feedback_protocol_block)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1407,14 +1403,18 @@ fn call_router(
     cfg: &RecommendConfig,
     api_key: &str,
     user_msg: &str,
-) -> Result<(RouterMode, Vec<String>, RouterCallStats, String)> {
+    history: &[RouterTurn],
+) -> Result<(RouterMode, String, Vec<String>, RouterCallStats, String)> {
     let (raw, stats) = match cfg.provider {
-        Provider::OpenaiCompat => call_openai_compat(cfg, api_key, user_msg)?,
-        Provider::Anthropic => call_anthropic(cfg, api_key, user_msg)?,
+        Provider::OpenaiCompat => call_openai_compat(cfg, api_key, user_msg, history)?,
+        Provider::Anthropic => call_anthropic(cfg, api_key, user_msg, history)?,
+        // ClaudeCli always boots a fresh Claude Code session per call,
+        // so conversation replay would have to ship the entire history
+        // through stdin every time — defeats the cost story. Stay oneshot.
         Provider::ClaudeCli => call_claude_cli(cfg, user_msg)?,
     };
-    let (mode, names) = split_mode_and_names(parse_lines(&raw));
-    Ok((mode, names, stats, raw))
+    let (mode, reasoning, names) = split_mode_and_names(parse_lines(&raw));
+    Ok((mode, reasoning, names, stats, raw))
 }
 
 /// Run the router via `claude -p --model <model>`. Uses the user's Claude
@@ -1490,28 +1490,58 @@ fn call_claude_cli(cfg: &RecommendConfig, user_msg: &str) -> Result<(String, Rou
     Ok((content.to_string(), stats))
 }
 
-/// Pop the first non-empty line as the mode tag; remaining lines are skill
-/// names. Unknown / missing tag defaults to `Exclusive` (the safer choice —
-/// the main agent will ask the user to pick).
-fn split_mode_and_names(content: Vec<String>) -> (RouterMode, Vec<String>) {
+/// Parse router output into `(mode, reasoning, skill_names)`.
+///
+/// Expected shape:
+/// ```text
+/// COMPATIBLE                  ← line 1: mode tag
+/// reasoning: 用户在做 X，建议 A+B  ← line 2 (optional): `reasoning:` prefix
+/// skill-a                     ← line 3+: one skill name each
+/// skill-b
+/// ```
+///
+/// Missing / unknown mode → defaults to `Exclusive` (safer — main agent
+/// will ask the user to pick). Missing `reasoning:` line → empty string;
+/// the renderer hides the block.
+fn split_mode_and_names(content: Vec<String>) -> (RouterMode, String, Vec<String>) {
     let mut iter = content.into_iter().filter(|l| !l.is_empty());
     let first = match iter.next() {
         Some(s) => s,
-        None => return (RouterMode::Exclusive, Vec::new()),
+        None => return (RouterMode::Exclusive, String::new(), Vec::new()),
     };
     let upper = first.to_ascii_uppercase();
-    if upper == "COMPATIBLE" {
-        (RouterMode::Compatible, iter.collect())
+    let mode = if upper == "COMPATIBLE" {
+        RouterMode::Compatible
     } else if upper == "EXCLUSIVE" {
-        (RouterMode::Exclusive, iter.collect())
+        RouterMode::Exclusive
     } else {
-        // First line wasn't a tag — keep its original case as a skill name
-        // and default to Exclusive (safer — main agent will ask user to
-        // pick). Defensive against LLMs that forget the tag.
+        // First line wasn't a tag — treat it as a skill name and default
+        // to Exclusive. Defensive against LLMs that forget the tag.
         let mut names = vec![first];
         names.extend(iter);
-        (RouterMode::Exclusive, names)
+        return (RouterMode::Exclusive, String::new(), names);
+    };
+
+    let mut reasoning = String::new();
+    let mut names: Vec<String> = Vec::new();
+    for line in iter {
+        let stripped = line.trim();
+        let lower = stripped.to_ascii_lowercase();
+        if reasoning.is_empty()
+            && (lower.starts_with("reasoning:") || lower.starts_with("reasoning："))
+        {
+            // accept both ASCII and fullwidth colon
+            let body = stripped
+                .split_once([':', '：'])
+                .map(|(_, rest)| rest)
+                .unwrap_or("")
+                .trim();
+            reasoning = body.to_string();
+            continue;
+        }
+        names.push(line);
     }
+    (mode, reasoning, names)
 }
 
 fn parse_openai_usage(v: &serde_json::Value) -> RouterCallStats {
@@ -1557,6 +1587,7 @@ fn call_openai_compat(
     cfg: &RecommendConfig,
     api_key: &str,
     user_msg: &str,
+    history: &[RouterTurn],
 ) -> Result<(String, RouterCallStats)> {
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     // Disable thinking on reasoning models so the router answers instantly.
@@ -1564,12 +1595,19 @@ fn call_openai_compat(
     // None). For non-reasoning models or other OpenAI-compat backends this
     // field is silently ignored, so it's safe to always send.
     // max_tokens is intentionally omitted — let the model use its full budget.
+    let mut messages = Vec::with_capacity(1 + history.len() * 2 + 1);
+    messages.push(serde_json::json!({
+        "role": "system",
+        "content": SYSTEM_PROMPT_TEMPLATE,
+    }));
+    for turn in history {
+        messages.push(serde_json::json!({"role": "user", "content": turn.user}));
+        messages.push(serde_json::json!({"role": "assistant", "content": turn.assistant}));
+    }
+    messages.push(serde_json::json!({"role": "user", "content": user_msg}));
     let body = serde_json::json!({
         "model": cfg.model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT_TEMPLATE},
-            {"role": "user", "content": user_msg},
-        ],
+        "messages": messages,
         "thinking": {"type": "disabled"},
         "stream": false,
     });
@@ -1619,13 +1657,20 @@ fn call_anthropic(
     cfg: &RecommendConfig,
     api_key: &str,
     user_msg: &str,
+    history: &[RouterTurn],
 ) -> Result<(String, RouterCallStats)> {
     let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
+    let mut messages = Vec::with_capacity(history.len() * 2 + 1);
+    for turn in history {
+        messages.push(serde_json::json!({"role": "user", "content": turn.user}));
+        messages.push(serde_json::json!({"role": "assistant", "content": turn.assistant}));
+    }
+    messages.push(serde_json::json!({"role": "user", "content": user_msg}));
     let body = serde_json::json!({
         "model": cfg.model,
         "max_tokens": 256,
         "system": SYSTEM_PROMPT_TEMPLATE,
-        "messages": [{"role": "user", "content": user_msg}],
+        "messages": messages,
     });
     let resp = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -1771,89 +1816,23 @@ fn extract_at_references(body: &str) -> Vec<String> {
 /// Read the most recent `n` user/assistant text messages from a Claude Code
 /// session jsonl, oldest-first. Tool calls/results are dropped; only plain
 /// text is kept. Returns empty string on any read or parse error.
-/// Scan the transcript jsonl for `Read` tool calls whose `file_path` argument
-/// points at a managed skill's `SKILL.md`. Returns the set of skill names the
-/// main Claude agent has actually opened in this transcript — this is the
-/// **verified-adoption signal**, derived from Claude Code's own event log
-/// rather than the agent's self-report.
-///
-/// `skills_dir` is the absolute path to `<data_dir>/skills/` so we can match
-/// `<skills_dir>/<name>/SKILL.md` precisely without false positives from
-/// unrelated paths.
-///
-/// Best-effort: any parse error or missing file just yields an empty set.
-pub fn transcript_adopted_skills(
-    transcript_path: &Path,
-    skills_dir: &Path,
-) -> std::collections::BTreeSet<String> {
-    let mut out = std::collections::BTreeSet::new();
-    let raw = match fs::read_to_string(transcript_path) {
-        Ok(s) => s,
-        Err(_) => return out,
-    };
-    // Normalize separators: on Windows `to_string_lossy()` returns
-    // backslash-form `C:\Users\…\skills`, but transcript jsonl file_path
-    // values are JSON strings that may use either separator (and
-    // backslashes inside JSON are escape sequences, so authors usually
-    // write forward slashes anyway). Compare in a single normalized form
-    // so prefix-match works regardless of which side uses which slash.
-    fn norm(p: &str) -> String {
-        p.replace('\\', "/")
-    }
-    let skills_dir_s = norm(&skills_dir.to_string_lossy());
-    for line in raw.lines() {
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if v.get("type").and_then(|x| x.as_str()) != Some("assistant") {
-            continue;
-        }
-        let content = match v
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_array())
-        {
-            Some(c) => c,
-            None => continue,
-        };
-        for block in content {
-            if block.get("type").and_then(|x| x.as_str()) != Some("tool_use") {
-                continue;
-            }
-            if block.get("name").and_then(|x| x.as_str()) != Some("Read") {
-                continue;
-            }
-            let path = block
-                .get("input")
-                .and_then(|i| i.get("file_path"))
-                .and_then(|p| p.as_str());
-            let path = match path {
-                Some(p) => p,
-                None => continue,
-            };
-            let path_norm = norm(path);
-            // Path shape: <skills_dir>/<name>/SKILL.md — pull the <name>
-            // segment out. Tolerate trailing/internal slashes by splitting.
-            if let Some(suffix) = path_norm.strip_prefix(skills_dir_s.as_str()) {
-                let suffix = suffix.trim_start_matches('/');
-                if let Some(slash) = suffix.find('/') {
-                    let name = &suffix[..slash];
-                    let rest = &suffix[slash + 1..];
-                    if rest == "SKILL.md" && !name.is_empty() {
-                        out.insert(name.to_string());
-                    }
-                }
-            }
-        }
-    }
-    out
+pub fn recent_transcript_messages(transcript_path: &Path, n: usize) -> String {
+    let msgs = recent_transcript_pairs(transcript_path, n);
+    msgs.iter()
+        .map(|(r, t)| format!("[{r}] {t}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-pub fn recent_transcript_messages(transcript_path: &Path, n: usize) -> String {
+/// Return the most recent `n` user+assistant turns as (role, text) pairs,
+/// oldest-first. Tool calls / results filtered out. Each text capped at
+/// 400 chars. Used by `recent_transcript_messages` (renders to a single
+/// string for the LLM) and `recent_user_prompts_for_bm25` (returns only
+/// the user-side strings for keyword recall).
+pub fn recent_transcript_pairs(transcript_path: &Path, n: usize) -> Vec<(String, String)> {
     let raw = match fs::read_to_string(transcript_path) {
         Ok(s) => s,
-        Err(_) => return String::new(),
+        Err(_) => return Vec::new(),
     };
     let mut msgs: Vec<(String, String)> = Vec::new();
     for line in raw.lines() {
@@ -1897,11 +1876,27 @@ pub fn recent_transcript_messages(transcript_path: &Path, n: usize) -> String {
         msgs.push((role, truncated));
     }
     let take_from = msgs.len().saturating_sub(n);
-    msgs[take_from..]
-        .iter()
-        .map(|(r, t)| format!("[{r}] {t}"))
+    msgs[take_from..].to_vec()
+}
+
+/// Return the last `n` user messages concatenated as a single string,
+/// usable as extra BM25 prefilter input. Assistant messages are dropped
+/// (they're the main agent's output — feeding them back would self-bias
+/// the prefilter toward whatever the agent just talked about).
+///
+/// Why this exists: BM25 prefilter sees only `user_prompt`. Short
+/// follow-up prompts like "不对换一个" / "有没有其他的 ppt" carry zero
+/// keywords on their own — the topic ("ppt") lives in earlier user
+/// turns. Without history, ppt-related skills get filtered out of the
+/// top-30 candidate set before the LLM router ever sees them.
+pub fn recent_user_prompts_for_bm25(transcript_path: &Path, n: usize) -> String {
+    let pairs = recent_transcript_pairs(transcript_path, n);
+    pairs
+        .into_iter()
+        .filter(|(role, _)| role == "user")
+        .map(|(_, t)| t)
         .collect::<Vec<_>>()
-        .join("\n")
+        .join(" ")
 }
 
 /// First-run guidance shown as hook stdout when the router is not yet
@@ -1942,16 +1937,17 @@ pub enum HookInstallStatus {
 }
 
 const HOOK_COMMAND: &str = "runai recommend";
-const POST_TOOL_HOOK_COMMAND: &str = "runai recommend post-tool";
+/// Legacy command string kept for uninstall-time cleanup. Older runai
+/// versions wrote this entry into PostToolUse; new installs no longer do.
+const LEGACY_POST_TOOL_HOOK_COMMAND: &str = "runai recommend post-tool";
 
-/// Install the UserPromptSubmit hook + a PostToolUse hook (matcher: Read)
-/// into `<home>/.claude/settings.json`. The UserPromptSubmit hook is the
-/// router — pulls a recommendation for each user prompt. The PostToolUse
-/// hook is the verification + bookkeeping side: after every Read of a
-/// managed SKILL.md, runai bumps usage_count and records the adoption so
-/// the same skill stops getting re-recommended within the session.
-/// Idempotent; re-running when our hooks are already present is a no-op.
-/// A `.runai-bak` snapshot of the previous settings.json is written next to it.
+/// Install the UserPromptSubmit hook into `<home>/.claude/settings.json`.
+/// The hook runs the router for each user prompt and injects the chosen
+/// skills as additional context. Idempotent.
+///
+/// As a side-effect, any legacy `runai recommend post-tool` entry in the
+/// PostToolUse array is removed: counting now flows exclusively through
+/// `runai recommend get`, so the PostToolUse path is no longer wired.
 pub fn install_claude_hook(home: &Path) -> Result<HookInstallStatus> {
     let claude_dir = home.join(".claude");
     let path = claude_dir.join("settings.json");
@@ -1967,33 +1963,35 @@ pub fn install_claude_hook(home: &Path) -> Result<HookInstallStatus> {
         }));
     }
 
-    // PostToolUse — match Read so we don't fire on every tool call.
-    let pt_arr = ensure_named_hook_array(&mut value, "PostToolUse")?;
-    let pt_already = pt_arr.iter().any(|group| {
-        group
-            .get("hooks")
-            .and_then(|h| h.as_array())
-            .map(|arr| {
-                arr.iter().any(|h| {
-                    h.get("command").and_then(|c| c.as_str()) == Some(POST_TOOL_HOOK_COMMAND)
-                })
-            })
-            .unwrap_or(false)
-    });
-    if !pt_already {
-        pt_arr.push(serde_json::json!({
-            "matcher": "Read",
-            "hooks": [
-                {"type": "command", "command": POST_TOOL_HOOK_COMMAND}
-            ]
-        }));
-    }
+    let legacy_removed = remove_legacy_post_tool_hook(&mut value);
 
-    if ups_already && pt_already {
+    if ups_already && !legacy_removed {
         return Ok(HookInstallStatus::AlreadyPresent);
     }
     write_settings_json(&path, &value)?;
     Ok(HookInstallStatus::Installed)
+}
+
+/// Strip any historical `runai recommend post-tool` entry from
+/// settings.json. Returns true if something was actually removed.
+fn remove_legacy_post_tool_hook(value: &mut serde_json::Value) -> bool {
+    let arr = match get_named_hook_array(value, "PostToolUse") {
+        Some(a) => a,
+        None => return false,
+    };
+    let before = arr.len();
+    arr.retain(|group| {
+        let hooks = match group.get("hooks").and_then(|h| h.as_array()) {
+            Some(h) => h,
+            None => return true,
+        };
+        let all_legacy = !hooks.is_empty()
+            && hooks.iter().all(|h| {
+                h.get("command").and_then(|c| c.as_str()) == Some(LEGACY_POST_TOOL_HOOK_COMMAND)
+            });
+        !all_legacy
+    });
+    arr.len() != before
 }
 
 /// Remove the runai-installed hook from settings.json. Leaves unrelated hook
@@ -2212,59 +2210,6 @@ mod tests {
     }
 
     #[test]
-    fn transcript_adopted_skills_extracts_read_calls_matching_skills_dir() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let skills_dir = tmp.path().join("skills");
-        // Two assistant turns, one Read inside skills dir, one Read elsewhere
-        // (must be ignored), one matching but different skill, one non-Read
-        // tool (must be ignored).
-        //
-        // Windows path note: `tmp.path().display()` returns backslash-form
-        // (`C:\Users\…\skills`). Embedded raw into JSON, backslashes get
-        // interpreted as JSON escape sequences (`\U`, `\A`, …) — most of
-        // those are invalid and serde_json refuses the line, making the
-        // test fail with `adopted.len() == 0` on CI Windows. The fix is
-        // to emit the path with forward slashes for the JSON payload;
-        // the production function `transcript_adopted_skills` already
-        // normalizes both sides to forward slashes internally so this is
-        // a faithful reproduction of what Claude Code actually writes.
-        let skills_dir_json = skills_dir.display().to_string().replace('\\', "/");
-        let line1 = format!(
-            r#"{{"type":"assistant","timestamp":"2026-05-17T10:00:00Z","message":{{"role":"assistant","content":[{{"type":"tool_use","name":"Read","input":{{"file_path":"{}/figma-alignment/SKILL.md"}}}}]}}}}"#,
-            skills_dir_json
-        );
-        let line2 = format!(
-            r#"{{"type":"assistant","timestamp":"2026-05-17T10:01:00Z","message":{{"role":"assistant","content":[{{"type":"tool_use","name":"Read","input":{{"file_path":"/tmp/random.txt"}}}}]}}}}"#,
-        );
-        let line3 = format!(
-            r#"{{"type":"assistant","timestamp":"2026-05-17T10:02:00Z","message":{{"role":"assistant","content":[{{"type":"tool_use","name":"Read","input":{{"file_path":"{}/polish/SKILL.md"}}}}]}}}}"#,
-            skills_dir_json
-        );
-        let line4 = format!(
-            r#"{{"type":"assistant","timestamp":"2026-05-17T10:03:00Z","message":{{"role":"assistant","content":[{{"type":"tool_use","name":"Bash","input":{{"command":"ls"}}}}]}}}}"#,
-        );
-        let line5 = format!(
-            r#"{{"type":"user","timestamp":"2026-05-17T10:04:00Z","message":{{"role":"user","content":"hi"}}}}"#,
-        );
-        let transcript = tmp.path().join("session.jsonl");
-        std::fs::write(&transcript, [line1, line2, line3, line4, line5].join("\n")).unwrap();
-
-        let adopted = transcript_adopted_skills(&transcript, &skills_dir);
-        assert_eq!(adopted.len(), 2);
-        assert!(adopted.contains("figma-alignment"));
-        assert!(adopted.contains("polish"));
-    }
-
-    #[test]
-    fn transcript_adopted_skills_returns_empty_for_missing_file() {
-        let adopted = transcript_adopted_skills(
-            std::path::Path::new("/nonexistent/x.jsonl"),
-            std::path::Path::new("/x"),
-        );
-        assert!(adopted.is_empty());
-    }
-
-    #[test]
     fn parse_lines_strips_dash_and_backtick() {
         let raw = "figma-alignment\n- another-skill\n`third-skill`\n\n";
         let names = parse_lines(raw);
@@ -2278,6 +2223,36 @@ mod tests {
     fn parse_empty_input() {
         assert!(parse_lines("").is_empty());
         assert!(parse_lines("   \n\n").is_empty());
+    }
+
+    #[test]
+    fn recent_user_prompts_for_bm25_filters_assistant_and_concatenates() {
+        // Build a synthetic transcript jsonl with mixed user/assistant
+        // turns. The bm25 helper must pull only the user-side text — the
+        // assistant text would self-bias the prefilter back toward
+        // whatever the agent already talked about.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("session.jsonl");
+        let lines = [
+            r#"{"type":"user","message":{"role":"user","content":"我想做一个 demo-topic 的演示文稿"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"候选 skill-a / skill-b 你挑"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"不对换一个"}}"#,
+        ];
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let out = recent_user_prompts_for_bm25(&path, 5);
+        assert!(out.contains("demo-topic"));
+        assert!(out.contains("不对换一个"));
+        // Assistant body must not appear — that would self-reinforce
+        // whatever the router itself just said.
+        assert!(!out.contains("skill-a"));
+        assert!(!out.contains("skill-b"));
+        assert!(!out.contains("候选"));
+    }
+
+    #[test]
+    fn recent_user_prompts_returns_empty_for_missing_file() {
+        let out = recent_user_prompts_for_bm25(std::path::Path::new("/nonexistent.jsonl"), 5);
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -2360,7 +2335,11 @@ mod tests {
     }
 
     fn decision(mode: RouterMode, skills: Vec<RecommendedSkill>) -> RouterDecision {
-        RouterDecision { mode, skills }
+        RouterDecision {
+            mode,
+            reasoning: String::new(),
+            skills,
+        }
     }
 
     #[test]
@@ -2370,17 +2349,15 @@ mod tests {
 
     #[test]
     fn format_single_match_emits_get_command_not_raw_path() {
-        // Single-skill output deliberately hides the absolute SKILL.md path
-        // and forces the main agent to fetch via `runai recommend get
-        // <name>`. The path appearing in hook output would let the agent
-        // Read it directly, bypassing the atomic usage_count + adoption
-        // bookkeeping the get command does.
-        let body = "this skill content body should never appear in the hook output";
+        // Single-skill output never embeds a real filesystem path. The
+        // template references the `runai recommend get` command literally
+        // (placeholder `<skill_name>` for the agent to substitute), and
+        // mentions "SKILL.md" in prose ("stdout 是 SKILL.md 全文") which is
+        // fine — what we forbid is a concrete `/skills/<name>/SKILL.md`
+        // path leaking through.
         let s = RecommendedSkill {
             name: "figma-alignment".into(),
             description: "align vue/h5 to figma".into(),
-            path: PathBuf::from("/x/SKILL.md"),
-            content: body.into(),
         };
         let out = format_for_hook(&decision(RouterMode::Exclusive, vec![s]));
         assert!(
@@ -2389,34 +2366,28 @@ mod tests {
             out.len()
         );
         assert!(out.contains("figma-alignment"));
-        assert!(out.contains("runai recommend get figma-alignment"));
+        assert!(out.contains("runai recommend get"));
         assert!(
-            !out.contains("/x/SKILL.md"),
-            "absolute path must not leak in single-skill output (forces agent through `recommend get`)"
+            !out.contains("/skills/"),
+            "concrete skills-dir path must never appear in hook output"
         );
         assert!(
-            !out.contains(body),
-            "SKILL.md body must never be inlined in single-skill mode"
+            !out.contains("Source path"),
+            "no `Source path:` header anywhere"
         );
     }
 
     #[test]
-    fn format_single_match_large_does_not_inline_content() {
-        let huge = "x".repeat(9000);
+    fn format_single_match_omits_path_and_body() {
         let s = RecommendedSkill {
             name: "huge-skill".into(),
             description: "a very large skill".into(),
-            path: PathBuf::from("/x/huge/SKILL.md"),
-            content: huge.clone(),
         };
         let out = format_for_hook(&decision(RouterMode::Exclusive, vec![s]));
-        assert!(
-            out.len() < 4_000,
-            "pointer-only output must stay short, got {}",
-            out.len()
-        );
-        assert!(out.contains("runai recommend get huge-skill"));
-        assert!(!out.contains(&huge), "large content must not be inlined");
+        assert!(out.len() < 4_000);
+        assert!(out.contains("runai recommend get"));
+        assert!(out.contains("huge-skill"));
+        assert!(!out.contains("/skills/"));
     }
 
     #[test]
@@ -2424,85 +2395,127 @@ mod tests {
         let a = RecommendedSkill {
             name: "figma-alignment".into(),
             description: "align vue to figma".into(),
-            path: PathBuf::from("/x/figma/SKILL.md"),
-            content: "should NOT appear in output".into(),
         };
         let b = RecommendedSkill {
             name: "figma-component-mapping".into(),
             description: "map figma node to vue component".into(),
-            path: PathBuf::from("/x/map/SKILL.md"),
-            content: String::new(),
         };
         let out = format_for_hook(&decision(RouterMode::Exclusive, vec![a, b]));
-        // hook_multi.md was rewritten in zh; assert structural markers still
-        // present: candidate list bullets, no SKILL.md inline, agent told to
-        // run `runai recommend get` after user picks.
         assert!(out.contains("- **figma-alignment**"));
         assert!(out.contains("- **figma-component-mapping**"));
         assert!(out.contains("runai recommend get"));
-        assert!(!out.contains("should NOT appear"));
-        assert!(!out.contains("/x/figma/SKILL.md"));
-        assert!(!out.contains("/x/map/SKILL.md"));
+        assert!(!out.contains("/skills/"));
+        assert!(!out.contains("Source path"));
     }
 
     #[test]
-    fn format_compatible_multi_inlines_all_under_budget() {
+    fn format_compatible_multi_lists_all_candidates_via_get_command() {
         let a = RecommendedSkill {
             name: "github".into(),
             description: "gh cli wrapper".into(),
-            path: PathBuf::from("/x/github/SKILL.md"),
-            content: "github skill body — small".into(),
         };
         let b = RecommendedSkill {
             name: "writing-skills".into(),
             description: "write/edit skills".into(),
-            path: PathBuf::from("/x/writing/SKILL.md"),
-            content: "writing skill body — also small".into(),
         };
         let out = format_for_hook(&decision(RouterMode::Compatible, vec![a, b]));
-        assert!(out.contains("Compatible skill set"));
-        assert!(out.contains("激活 skills: github, writing-skills"));
-        assert!(out.contains("github skill body"));
-        assert!(out.contains("writing skill body"));
+        assert!(out.contains("github"));
+        assert!(out.contains("writing-skills"));
+        assert!(out.contains("runai recommend get"));
+        assert!(
+            !out.contains("/skills/"),
+            "compatible hook must not leak a concrete skills-dir path"
+        );
+        assert!(
+            !out.contains("Source path"),
+            "compatible hook must not emit `Source path:` header"
+        );
         assert!(out.len() < 10_000);
     }
 
     #[test]
+    fn format_hook_renders_reasoning_when_present() {
+        let s = RecommendedSkill {
+            name: "alpha".into(),
+            description: "test skill".into(),
+        };
+        let decision_with_reason = RouterDecision {
+            mode: RouterMode::Exclusive,
+            reasoning: "用户在做 X，建议 alpha".into(),
+            skills: vec![s],
+        };
+        let out = format_for_hook(&decision_with_reason);
+        assert!(out.contains("router 判断"));
+        assert!(out.contains("用户在做 X"));
+    }
+
+    #[test]
+    fn format_hook_hides_reasoning_block_when_empty() {
+        let s = RecommendedSkill {
+            name: "alpha".into(),
+            description: "test skill".into(),
+        };
+        let out = format_for_hook(&decision(RouterMode::Exclusive, vec![s]));
+        assert!(
+            !out.contains("router 判断"),
+            "no reasoning line when LLM didn't supply one"
+        );
+    }
+
+    #[test]
     fn split_mode_compatible_then_skills() {
-        let (mode, names) = split_mode_and_names(vec![
+        let (mode, reasoning, names) = split_mode_and_names(vec![
             "COMPATIBLE".into(),
             "github".into(),
             "writing-skills".into(),
         ]);
         assert_eq!(mode, RouterMode::Compatible);
+        assert!(reasoning.is_empty(), "no reasoning line provided");
         assert_eq!(names, vec!["github", "writing-skills"]);
     }
 
     #[test]
     fn split_mode_exclusive_then_skills() {
-        let (mode, names) = split_mode_and_names(vec![
+        let (mode, reasoning, names) = split_mode_and_names(vec![
             "EXCLUSIVE".into(),
             "generate-image".into(),
             "fal-ai-media".into(),
         ]);
         assert_eq!(mode, RouterMode::Exclusive);
+        assert!(reasoning.is_empty());
         assert_eq!(names, vec!["generate-image", "fal-ai-media"]);
+    }
+
+    #[test]
+    fn split_mode_with_reasoning_line() {
+        let (mode, reasoning, names) = split_mode_and_names(vec![
+            "COMPATIBLE".into(),
+            "reasoning: 用户在做整套链路调试，emulator + debug-suite 协作".into(),
+            "emulator-launch".into(),
+            "ktv-car-debug-suite".into(),
+        ]);
+        assert_eq!(mode, RouterMode::Compatible);
+        assert!(reasoning.contains("整套链路调试"));
+        assert!(reasoning.contains("emulator"));
+        assert_eq!(names, vec!["emulator-launch", "ktv-car-debug-suite"]);
     }
 
     #[test]
     fn split_mode_missing_tag_defaults_to_exclusive() {
         // If the LLM forgets the tag, treat the first line as a skill and
         // default mode to Exclusive (safer — user decides).
-        let (mode, names) =
+        let (mode, reasoning, names) =
             split_mode_and_names(vec!["just-one-skill".into(), "another-skill".into()]);
         assert_eq!(mode, RouterMode::Exclusive);
+        assert!(reasoning.is_empty());
         assert_eq!(names, vec!["just-one-skill", "another-skill"]);
     }
 
     #[test]
     fn split_mode_empty_returns_exclusive_empty() {
-        let (mode, names) = split_mode_and_names(vec![]);
+        let (mode, reasoning, names) = split_mode_and_names(vec![]);
         assert_eq!(mode, RouterMode::Exclusive);
+        assert!(reasoning.is_empty());
         assert!(names.is_empty());
     }
 

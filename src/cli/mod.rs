@@ -204,37 +204,16 @@ pub enum RecommendCommands {
         #[arg(long)]
         note: String,
     },
-    /// Record that the main Claude agent actually adopted (Read) a
-    /// recommended skill's SKILL.md this turn — bumps the skill's
-    /// usage_count by 1 and updates last_used_at. The hook output for
-    /// single-skill recommendations now sends only a pointer + description,
-    /// so this is the explicit "yes I'm using it" signal from the agent.
-    Used {
-        /// Skill name that was actually adopted
-        skill: String,
-    },
     /// Fetch a skill's SKILL.md content AND record adoption atomically.
     /// Stdout = SKILL.md body. Side effects: usage_count +1, session
-    /// adoption row written (if CLAUDE_SESSION_ID is set). Designed to be
-    /// the **only** path through which the main Claude agent obtains a
-    /// recommended skill's contents — hook_pointer template no longer
-    /// exposes the absolute path, so the agent must Bash this command to
-    /// see the SKILL.md. Calling this command = the adoption signal; the
-    /// previous transcript-mining + PostToolUse paths become belt-and-
-    /// braces fallback instead of the primary signal.
+    /// adoption row written (if CLAUDE_SESSION_ID is set). The hook output
+    /// no longer exposes any skill path, so the main agent must run this
+    /// command to obtain a recommended skill's contents — making this the
+    /// single source of truth for "skill adopted" signal.
     Get {
         /// Skill name (must exist under <data_dir>/skills/<name>/SKILL.md)
         skill: String,
     },
-    /// Claude Code PostToolUse hook entry. Reads the PostToolUse JSON from
-    /// stdin and, when the tool was `Read` against a SKILL.md inside the
-    /// managed skills dir, records adoption (usage_count +1 +
-    /// session_adoption row) immediately. Replaces the lossy "next
-    /// UserPromptSubmit scans transcript" path: if the user closes the
-    /// turn after Read without sending another prompt, transcript-mining
-    /// never fires, so the adoption was lost. PostToolUse fires
-    /// per-tool-call, can't be missed.
-    PostTool,
     /// Wipe all LLM summaries (resource_ai_summary) — next enrich rebuilds.
     ResetScoring {
         /// Skip the "are you sure" prompt (for scripts / hooks)
@@ -1304,28 +1283,6 @@ To install/uninstall automatically (preserves existing hooks and theme):
             );
             Ok(())
         }
-        (Some(RecommendCommands::Used { skill }), _) => {
-            // Session id is best-effort: comes from CLAUDE_SESSION_ID if the
-            // main agent set it (the hook output tells it how), otherwise
-            // empty — usage_count still bumps regardless.
-            let sid = std::env::var("CLAUDE_SESSION_ID").unwrap_or_default();
-            match mgr.record_usage(&skill) {
-                Ok(()) => {}
-                Err(e) => eprintln!("(warn) record_usage: {e}"),
-            }
-            if !sid.is_empty() {
-                let _ = mgr.db().record_session_adoption(&sid, &skill);
-            }
-            println!(
-                "recorded adoption: {skill}{}",
-                if sid.is_empty() {
-                    ""
-                } else {
-                    " (session-deduped)"
-                }
-            );
-            Ok(())
-        }
         (Some(RecommendCommands::Get { skill }), _) => {
             let path = mgr.paths().skills_dir().join(&skill).join("SKILL.md");
             let content = match std::fs::read_to_string(&path) {
@@ -1347,60 +1304,6 @@ To install/uninstall automatically (preserves existing hooks and theme):
             eprintln!("# path: {}", path.display());
             eprintln!("# usage_count +1 recorded");
             print!("{content}");
-            Ok(())
-        }
-        (Some(RecommendCommands::PostTool), _) => {
-            // Claude Code PostToolUse hook stdin shape (per Claude Code docs):
-            //   {"tool_name": "Read",
-            //    "tool_input": {"file_path": "/abs/path"},
-            //    "session_id": "...", ...}
-            // We only care about Read of `<skills_dir>/<X>/SKILL.md`.
-            use std::io::Read;
-            let mut buf = String::new();
-            if std::io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
-                return Ok(());
-            }
-            let v: serde_json::Value = match serde_json::from_str(&buf) {
-                Ok(v) => v,
-                Err(_) => return Ok(()),
-            };
-            if v.get("tool_name").and_then(|x| x.as_str()) != Some("Read") {
-                return Ok(());
-            }
-            let file_path = v
-                .get("tool_input")
-                .and_then(|i| i.get("file_path"))
-                .and_then(|p| p.as_str())
-                .unwrap_or("");
-            if file_path.is_empty() {
-                return Ok(());
-            }
-            let skills_dir = mgr.paths().skills_dir();
-            let skills_dir_s = skills_dir.to_string_lossy().to_string();
-            let suffix = match file_path.strip_prefix(skills_dir_s.as_str()) {
-                Some(s) => s.trim_start_matches('/'),
-                None => return Ok(()),
-            };
-            let slash = match suffix.find('/') {
-                Some(i) => i,
-                None => return Ok(()),
-            };
-            let skill_name = &suffix[..slash];
-            let rest = &suffix[slash + 1..];
-            if rest != "SKILL.md" || skill_name.is_empty() {
-                return Ok(());
-            }
-            let sid = v
-                .get("session_id")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string();
-            let _ = mgr.record_usage(skill_name);
-            if !sid.is_empty() {
-                let _ = mgr.db().record_session_adoption(&sid, skill_name);
-            }
-            // Hook stdout is folded back into the agent context; keep it
-            // empty so the agent sees nothing — this is pure bookkeeping.
             Ok(())
         }
         (Some(RecommendCommands::ResetScoring { yes }), _) => {

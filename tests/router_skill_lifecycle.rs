@@ -1,21 +1,19 @@
-//! Integration tests for the `runai recommend get` / `runai recommend post-tool`
-//! adoption-and-counting pipeline.
+//! Integration tests for the `runai recommend get` adoption + counting
+//! pipeline. `runai recommend get` is the **only** path through which
+//! a skill's SKILL.md leaves runai and the only path that bumps
+//! usage_count + writes a session-adoption row — these tests lock that
+//! invariant by exercising the real binary against an isolated HOME
+//! tempdir (production `~/.runai/` is never touched).
 //!
 //! Pass criteria are written down here, not in prose:
 //!   - `recommend_get_*` tests assert (stdout, stderr, usage_count delta,
 //!     session_adoption row) after a single command invocation.
-//!   - `recommend_post_tool_*` tests assert the same when the PostToolUse
-//!     hook stdin matches / does not match a managed SKILL.md path.
-//!
-//! Every test runs the real `runai` binary against an isolated HOME tempdir;
-//! the production `~/.runai/` is never touched.
 #![cfg(not(target_os = "windows"))]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use assert_cmd::cargo::CommandCargoExt;
-use std::io::Write;
 use tempfile::TempDir;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -85,25 +83,6 @@ impl TestEnv {
             .env_remove("SKILL_MANAGER_DATA_DIR")
             .env("CLAUDE_SESSION_ID", session_id);
         cmd.output().expect("runai binary spawn")
-    }
-
-    fn run_with_stdin(&self, args: &[&str], stdin_payload: &str) -> std::process::Output {
-        let mut cmd = runai();
-        cmd.args(args)
-            .env("HOME", self.home())
-            .env_remove("RUNE_DATA_DIR")
-            .env_remove("SKILL_MANAGER_DATA_DIR")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = cmd.spawn().expect("spawn runai");
-        child
-            .stdin
-            .as_mut()
-            .unwrap()
-            .write_all(stdin_payload.as_bytes())
-            .unwrap();
-        child.wait_with_output().expect("wait runai")
     }
 
     /// Read `usage_count` for a skill from the test DB. Returns 0 when the
@@ -222,78 +201,5 @@ fn recommend_get_missing_skill_exits_nonzero_and_does_not_touch_db() {
     assert!(!env.has_session_adoption("sess-X", "ghost"));
 }
 
-// ─── `runai recommend post-tool` ────────────────────────────────────────────
-
-#[test]
-fn recommend_post_tool_records_on_skill_read() {
-    let env = TestEnv::new();
-    env.plant_skill("delta", "test skill delta");
-
-    let skill_md = env.managed_skills_dir().join("delta").join("SKILL.md");
-    let payload = format!(
-        r#"{{"tool_name":"Read","tool_input":{{"file_path":"{}"}},"session_id":"sess-D"}}"#,
-        skill_md.display()
-    );
-
-    let out = env.run_with_stdin(&["recommend", "post-tool"], &payload);
-    assert!(out.status.success(), "post-tool always exits 0");
-
-    assert_eq!(env.usage_count("delta"), 1);
-    assert!(env.has_session_adoption("sess-D", "delta"));
-}
-
-#[test]
-fn recommend_post_tool_ignores_non_read_tool() {
-    let env = TestEnv::new();
-    env.plant_skill("epsilon", "test skill epsilon");
-
-    let payload = r#"{"tool_name":"Bash","tool_input":{"command":"ls"},"session_id":"sess-E"}"#;
-    let out = env.run_with_stdin(&["recommend", "post-tool"], payload);
-    assert!(out.status.success());
-
-    assert_eq!(env.usage_count("epsilon"), 0);
-    assert!(!env.has_session_adoption("sess-E", "epsilon"));
-}
-
-#[test]
-fn recommend_post_tool_ignores_read_outside_skills_dir() {
-    let env = TestEnv::new();
-    env.plant_skill("zeta", "test skill zeta");
-
-    let payload = r#"{"tool_name":"Read","tool_input":{"file_path":"/tmp/random.txt"},"session_id":"sess-Z"}"#;
-    let out = env.run_with_stdin(&["recommend", "post-tool"], payload);
-    assert!(out.status.success());
-
-    assert_eq!(env.usage_count("zeta"), 0);
-    assert!(!env.has_session_adoption("sess-Z", "zeta"));
-}
-
-#[test]
-fn recommend_post_tool_ignores_read_of_non_skill_md_inside_skill_dir() {
-    let env = TestEnv::new();
-    env.plant_skill("eta", "test skill eta");
-    // A neighbour file inside the skill dir but not SKILL.md.
-    let neighbour = env.managed_skills_dir().join("eta").join("notes.md");
-    std::fs::write(&neighbour, "neighbouring notes").unwrap();
-
-    let payload = format!(
-        r#"{{"tool_name":"Read","tool_input":{{"file_path":"{}"}},"session_id":"sess-N"}}"#,
-        neighbour.display()
-    );
-    let out = env.run_with_stdin(&["recommend", "post-tool"], &payload);
-    assert!(out.status.success());
-
-    // Reading a non-SKILL.md file even inside the skill dir must NOT count.
-    assert_eq!(env.usage_count("eta"), 0);
-    assert!(!env.has_session_adoption("sess-N", "eta"));
-}
-
-#[test]
-fn recommend_post_tool_with_garbage_stdin_is_noop() {
-    let env = TestEnv::new();
-    env.plant_skill("theta", "test skill theta");
-
-    let out = env.run_with_stdin(&["recommend", "post-tool"], "not json at all");
-    assert!(out.status.success(), "garbage stdin must not error out");
-    assert_eq!(env.usage_count("theta"), 0);
-}
+// PostToolUse and `Used` are gone — the only path to bump usage_count is
+// `runai recommend get`. Tests above already lock that contract.
