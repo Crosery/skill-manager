@@ -1345,8 +1345,13 @@ fn render_hook_output(
         }
     };
 
+    // reasoning is mandatory per recommend_system.md. When the router LLM
+    // skips it anyway, render a visible "missing" marker rather than
+    // silently hiding the block — that nudge propagates back to the model
+    // (in Conversation mode it sees its own past outputs) and to humans
+    // reading the dashboard so the format-error is visible and fixable.
     let reasoning_block = if decision.reasoning.trim().is_empty() {
-        String::new()
+        "router 判断：(router 没给出推理 — 格式错误)\n\n".to_string()
     } else {
         format!("router 判断：{}\n\n", decision.reasoning.trim())
     };
@@ -2450,16 +2455,19 @@ mod tests {
     }
 
     #[test]
-    fn format_hook_hides_reasoning_block_when_empty() {
+    fn format_hook_renders_missing_reasoning_marker_when_empty() {
+        // Empty reasoning is a router LLM format error (recommend_system.md
+        // declares it mandatory). The renderer surfaces a visible marker
+        // rather than hiding the block silently — so the failure is
+        // visible to humans on the dashboard and to the LLM itself when
+        // Conversation mode replays prior turns.
         let s = RecommendedSkill {
             name: "alpha".into(),
             description: "test skill".into(),
         };
         let out = format_for_hook(&decision(RouterMode::Exclusive, vec![s]));
-        assert!(
-            !out.contains("router 判断"),
-            "no reasoning line when LLM didn't supply one"
-        );
+        assert!(out.contains("router 判断"));
+        assert!(out.contains("格式错误"));
     }
 
     #[test]

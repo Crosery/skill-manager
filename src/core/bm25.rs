@@ -17,6 +17,24 @@ use std::collections::{HashMap, HashSet};
 const K1: f64 = 1.5;
 const B: f64 = 0.75;
 
+/// High-frequency CJK单字 that carry no topical information. Dropping these
+/// at the unigram level prevents BM25 noise — without filtering, every skill
+/// whose triggers contain "做" / "的" / "我" lights up regardless of topic
+/// (because CJK unigrams + the bilingual tokenizer otherwise lump these in
+/// with real content tokens). CJK bigrams formed from adjacent stop+content
+/// chars like "做P" / "的事" are NOT filtered — those still carry signal as
+/// compound n-grams. Only the bare unigram form is dropped.
+const CJK_STOP_UNIGRAMS: &[&str] = &[
+    "的", "了", "和", "是", "在", "我", "你", "他", "她", "它", "们", "也", "都", "就", "要", "把",
+    "被", "给", "对", "下", "上", "里", "外", "这", "那", "哪", "做", "有", "没", "为", "之", "与",
+    "及", "或", "但", "而", "且", "若", "则", "如", "于", "以", "由", "向", "从", "到", "去", "来",
+    "再", "又", "还", "已", "啊", "吧", "呢", "吗", "嘛", "呀", "哦", "哈", "嗯",
+];
+
+fn is_cjk_stop(s: &str) -> bool {
+    CJK_STOP_UNIGRAMS.iter().any(|w| *w == s)
+}
+
 pub fn tokenize(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let lower = text.to_lowercase();
@@ -32,7 +50,13 @@ pub fn tokenize(text: &str) -> Vec<String> {
             let tok: String = chars[start..i].iter().collect();
             tokens.push(tok);
         } else if is_cjk(c) {
-            tokens.push(c.to_string());
+            let unigram = c.to_string();
+            // Drop bare high-frequency CJK stop-unigrams. Bigrams formed
+            // from adjacent stops + content (e.g. "做" + "P" → "做P") are
+            // still kept below — those carry signal.
+            if !is_cjk_stop(&unigram) {
+                tokens.push(unigram);
+            }
             if i + 1 < chars.len() && is_cjk(chars[i + 1]) {
                 let bigram: String = chars[i..i + 2].iter().collect();
                 tokens.push(bigram);
@@ -134,9 +158,11 @@ mod tests {
 
     #[test]
     fn tokenize_cjk_unigram_plus_bigram() {
-        let toks = tokenize("做 ppt");
-        // "做" + "ppt"; bigram only formed when adjacent CJK pair
-        assert!(toks.contains(&"做".to_string()));
+        // "做" is a stopword 现在被过滤；"演示" 是 content 保留
+        let toks = tokenize("演示 ppt");
+        assert!(toks.contains(&"演".to_string()));
+        assert!(toks.contains(&"示".to_string()));
+        assert!(toks.contains(&"演示".to_string()));
         assert!(toks.contains(&"ppt".to_string()));
     }
 
@@ -147,6 +173,41 @@ mod tests {
         assert!(toks.contains(&"交".to_string()));
         assert!(toks.contains(&"提交".to_string()));
         assert!(toks.contains(&"模型".to_string()));
+    }
+
+    #[test]
+    fn tokenize_drops_cjk_stop_unigrams() {
+        // "做" / "的" / "我" / "在" 不带主题信息，bare 单字应该被过滤
+        let toks = tokenize("我要做ppt的演示");
+        assert!(!toks.contains(&"我".to_string()), "我 应被过滤: {:?}", toks);
+        assert!(!toks.contains(&"做".to_string()), "做 应被过滤: {:?}", toks);
+        assert!(!toks.contains(&"的".to_string()), "的 应被过滤: {:?}", toks);
+        // 但 bigram 仍然保留，因为含 content 字 (e.g. "做p" 这种邻接组合带信息)
+        // "演示" 是 content bigram 必须保留
+        assert!(toks.contains(&"演示".to_string()));
+        // 真正 content 单字仍在
+        assert!(toks.contains(&"演".to_string()));
+        assert!(toks.contains(&"示".to_string()));
+        // latin 词不受影响
+        assert!(toks.contains(&"ppt".to_string()));
+    }
+
+    #[test]
+    fn rank_with_stopwords_does_not_falsely_boost_unrelated_skill() {
+        // 同样含 "做" 但主题不同的两个 doc。query "做ppt" 应该只命中 ppt-related
+        // 不该把 "怎么做事流程" 这种含 "做" 单字的 doc 也排前面。
+        let docs = vec![
+            "ppt-anything: 做漂亮的 ppt 演示文稿",    // ppt content
+            "deep-interview: 做事流程 苏格拉底 访谈", // "做" 出现但不是 ppt
+        ];
+        let scores = rank("做 ppt", &docs);
+        // ppt-anything 必须排第一，且分数明显高于含 "做" 但无 ppt 的 doc
+        assert_eq!(scores[0].0, 0);
+        assert!(
+            scores[0].1 > scores[1].1 * 2.0,
+            "ppt skill 应该明显领先 stopword-collision skill: {:?}",
+            scores
+        );
     }
 
     #[test]
