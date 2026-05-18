@@ -1100,17 +1100,13 @@ fn handle_recommend(
                             .unwrap_or_default()
                     };
                     // CLI hook path: hook output uses the unified HTTP
-                    // protocol — the agent will curl `${server_url}/...`.
-                    // server_url precedence:
-                    //   1. RUNAI_SERVER env var (set by client-install
-                    //      script or user shell rc — usually points at a
-                    //      remote thunder-style server)
-                    //   2. fallback "http://127.0.0.1:17888" — the local
-                    //      dashboard which `runai server --ensure` keeps
-                    //      running so the agent can always curl it.
-                    // No X-Runai-User header in local mode (single user).
-                    let local_server_url = std::env::var("RUNAI_SERVER")
-                        .unwrap_or_else(|_| "http://127.0.0.1:17888".to_string());
+                    // protocol — agent will curl `${server_url}/...`.
+                    // server_url uses the machine's outbound IPv4 (so the
+                    // rendered URL is reachable from any process / host
+                    // on the LAN, not loopback-only); falls back to
+                    // 127.0.0.1 when offline. No X-Runai-User header in
+                    // local mode (single user).
+                    let local_server_url = crate::core::recommend::default_local_server_url();
                     let out = crate::core::recommend::format_for_hook_full(
                         &decision,
                         sid,

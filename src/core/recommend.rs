@@ -671,16 +671,12 @@ pub fn recommend(
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
-        // CLI / library callers default to RUNAI_SERVER env var (set by
-        // client-install scripts or user shell rc to a LAN server URL),
-        // falling back to the local dashboard which `runai server --ensure`
-        // keeps running. The server endpoint path
+        // CLI / library callers default to the local machine's LAN
+        // IPv4-style URL (so any process / agent on the LAN can curl it,
+        // not just loopback). The server endpoint path
         // (server::handle_recommend) overrides via its own call with the
         // request-derived server_url + user_header.
-        let local_server_url = std::env::var("RUNAI_SERVER")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "http://127.0.0.1:17888".to_string());
+        let local_server_url = default_local_server_url();
         format_for_hook_full(
             &decision,
             session_id.unwrap_or(""),
@@ -1297,6 +1293,39 @@ fn write_last_recommend(paths: &AppPaths, decision: &RouterDecision) {
     let path = paths.data_dir().join("last-recommend.json");
     if let Ok(text) = serde_json::to_string_pretty(&entry) {
         let _ = fs::write(&path, text);
+    }
+}
+
+/// Best-effort detect the machine's outbound IPv4. Trick: open a UDP
+/// socket and `connect` to a public IP — no packets fly, but the OS
+/// picks the network interface it would route to, and `local_addr()`
+/// returns that interface's IP. Returns None when offline / IPv6-only /
+/// only loopback available.
+///
+/// Shared by `server::guess_server_url` (replace Host=loopback with LAN
+/// IP) and the CLI hook path (`recommend()` + `cli::handle_recommend`
+/// default server URL) so rendered hook output URLs are always
+/// teammate-reachable, not loopback-only.
+pub fn local_ipv4() -> Option<String> {
+    use std::net::UdpSocket;
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    let ip = addr.ip();
+    if ip.is_loopback() || ip.is_unspecified() {
+        return None;
+    }
+    Some(ip.to_string())
+}
+
+/// Default server URL used by CLI/library hook rendering when no remote
+/// server is configured. Returns `http://<LAN-IPv4>:17888` when a usable
+/// LAN IPv4 can be detected; falls back to `http://127.0.0.1:17888` when
+/// offline. The port is fixed to 17888 to match the dashboard default.
+pub fn default_local_server_url() -> String {
+    match local_ipv4() {
+        Some(ip) => format!("http://{ip}:17888"),
+        None => "http://127.0.0.1:17888".to_string(),
     }
 }
 

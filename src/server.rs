@@ -26,6 +26,7 @@ use crate::core::db::{Database, RouterEvent};
 use crate::core::manager::SkillManager;
 use crate::core::paths::AppPaths;
 use crate::core::recommend;
+use crate::core::recommend::local_ipv4;
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
@@ -1145,32 +1146,32 @@ async fn handle_uninstall_script() -> Response {
         .into_response()
 }
 
-/// Reconstruct the server URL the teammate curl'd from so rendered hook
-/// outputs and install scripts hard-code the same `http://host:port`.
-///
-/// Precedence:
-///   1. `RUNAI_PUBLIC_URL` env var — admin-set fixed public URL. Use this
-///      on a deployed server (e.g. `RUNAI_PUBLIC_URL=http://10.0.150.18:17888`)
-///      so the rendered URL is always the LAN-reachable address, even when
-///      a request comes in over 127.0.0.1 / localhost (local healthcheck).
-///   2. `Host` request header + `X-Forwarded-Proto` (if behind a reverse
-///      proxy). curl always sets Host so this is the normal LAN path.
-///   3. Fallback `http://127.0.0.1:17888`.
+/// Reconstruct the server URL clients should use. Strategy:
+///   - Use the request's `Host` header normally.
+///   - But if Host is a loopback (`127.0.0.1` / `localhost` / `[::1]`),
+///     substitute the machine's real LAN IPv4 — the rendered URL has to
+///     be reachable by teammates and Claude Code agents, not just by
+///     processes on the same box. A loopback URL leaks out only because
+///     curl came in over loopback (local healthcheck / agent on same
+///     host); we want the LAN form regardless.
 fn guess_server_url(headers: &HeaderMap) -> String {
-    if let Ok(env_url) = std::env::var("RUNAI_PUBLIC_URL") {
-        let trimmed = env_url.trim().trim_end_matches('/');
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-    let host = headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("127.0.0.1:17888");
     let scheme = headers
         .get("x-forwarded-proto")
         .and_then(|h| h.to_str().ok())
         .unwrap_or("http");
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("127.0.0.1:17888");
+
+    let host_part = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+    let port_part = host.rsplit_once(':').map(|(_, p)| p).unwrap_or("17888");
+    let is_loopback = matches!(host_part, "127.0.0.1" | "localhost" | "::1" | "[::1]");
+    if is_loopback {
+        if let Some(ip) = local_ipv4() {
+            return format!("{scheme}://{ip}:{port_part}");
+        }
+    }
     format!("{scheme}://{host}")
 }
 
