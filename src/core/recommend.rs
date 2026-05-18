@@ -1791,7 +1791,16 @@ pub fn transcript_adopted_skills(
         Ok(s) => s,
         Err(_) => return out,
     };
-    let skills_dir_s = skills_dir.to_string_lossy().to_string();
+    // Normalize separators: on Windows `to_string_lossy()` returns
+    // backslash-form `C:\Users\…\skills`, but transcript jsonl file_path
+    // values are JSON strings that may use either separator (and
+    // backslashes inside JSON are escape sequences, so authors usually
+    // write forward slashes anyway). Compare in a single normalized form
+    // so prefix-match works regardless of which side uses which slash.
+    fn norm(p: &str) -> String {
+        p.replace('\\', "/")
+    }
+    let skills_dir_s = norm(&skills_dir.to_string_lossy());
     for line in raw.lines() {
         let v: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
@@ -1823,9 +1832,10 @@ pub fn transcript_adopted_skills(
                 Some(p) => p,
                 None => continue,
             };
+            let path_norm = norm(path);
             // Path shape: <skills_dir>/<name>/SKILL.md — pull the <name>
             // segment out. Tolerate trailing/internal slashes by splitting.
-            if let Some(suffix) = path.strip_prefix(&*skills_dir_s) {
+            if let Some(suffix) = path_norm.strip_prefix(skills_dir_s.as_str()) {
                 let suffix = suffix.trim_start_matches('/');
                 if let Some(slash) = suffix.find('/') {
                     let name = &suffix[..slash];
@@ -2208,16 +2218,27 @@ mod tests {
         // Two assistant turns, one Read inside skills dir, one Read elsewhere
         // (must be ignored), one matching but different skill, one non-Read
         // tool (must be ignored).
+        //
+        // Windows path note: `tmp.path().display()` returns backslash-form
+        // (`C:\Users\…\skills`). Embedded raw into JSON, backslashes get
+        // interpreted as JSON escape sequences (`\U`, `\A`, …) — most of
+        // those are invalid and serde_json refuses the line, making the
+        // test fail with `adopted.len() == 0` on CI Windows. The fix is
+        // to emit the path with forward slashes for the JSON payload;
+        // the production function `transcript_adopted_skills` already
+        // normalizes both sides to forward slashes internally so this is
+        // a faithful reproduction of what Claude Code actually writes.
+        let skills_dir_json = skills_dir.display().to_string().replace('\\', "/");
         let line1 = format!(
             r#"{{"type":"assistant","timestamp":"2026-05-17T10:00:00Z","message":{{"role":"assistant","content":[{{"type":"tool_use","name":"Read","input":{{"file_path":"{}/figma-alignment/SKILL.md"}}}}]}}}}"#,
-            skills_dir.display()
+            skills_dir_json
         );
         let line2 = format!(
             r#"{{"type":"assistant","timestamp":"2026-05-17T10:01:00Z","message":{{"role":"assistant","content":[{{"type":"tool_use","name":"Read","input":{{"file_path":"/tmp/random.txt"}}}}]}}}}"#,
         );
         let line3 = format!(
             r#"{{"type":"assistant","timestamp":"2026-05-17T10:02:00Z","message":{{"role":"assistant","content":[{{"type":"tool_use","name":"Read","input":{{"file_path":"{}/polish/SKILL.md"}}}}]}}}}"#,
-            skills_dir.display()
+            skills_dir_json
         );
         let line4 = format!(
             r#"{{"type":"assistant","timestamp":"2026-05-17T10:03:00Z","message":{{"role":"assistant","content":[{{"type":"tool_use","name":"Bash","input":{{"command":"ls"}}}}]}}}}"#,
