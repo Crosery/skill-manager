@@ -13,9 +13,9 @@ use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -23,11 +23,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::core::db::{Database, RouterEvent};
+use crate::core::manager::SkillManager;
 use crate::core::paths::AppPaths;
+use crate::core::recommend;
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const APP_CSS: &str = include_str!("../web/app.css");
+/// Client-side install / uninstall scripts. The server serves these from
+/// GET /install and GET /uninstall after replacing the `{SERVER_URL}`
+/// placeholder with the URL the teammate just curl'd from, so the
+/// resulting bash script already knows where to point the hook wrapper.
+/// See scripts/runai-client-install.sh for the full doc.
+const CLIENT_INSTALL_SH: &str = include_str!("../scripts/runai-client-install.sh");
+const CLIENT_UNINSTALL_SH: &str = include_str!("../scripts/runai-client-uninstall.sh");
 
 /// Shared state for handlers. Holds only the DB path (and AppPaths if needed
 /// later for other resources) — rusqlite `Connection` is `!Sync`, so each
@@ -119,6 +128,12 @@ pub async fn serve(host: &str, port: u16) -> Result<()> {
         .route("/api/skill/{name}", get(api_skill_detail))
         .route("/api/skill/{name}/files", get(api_skill_files))
         .route("/api/skill/{name}/file", get(api_skill_file))
+        // Remote-hook protocol: teammates' Claude Code UserPromptSubmit hooks
+        // POST their standard hook JSON here and pipe stdout back into the
+        // agent. See scripts/runai-client-install.sh for the wrapper they run.
+        .route("/recommend", post(handle_recommend))
+        .route("/install", get(handle_install_script))
+        .route("/uninstall", get(handle_uninstall_script))
         .with_state(state);
 
     let addr: SocketAddr = format!("{host}:{port}")
@@ -735,6 +750,148 @@ async fn api_skill_file(
         truncated,
         is_text,
     }))
+}
+
+/// Pull a single field from the Claude Code hook payload, defaulting to
+/// empty string when missing.
+fn payload_str(payload: &serde_json::Value, key: &str) -> String {
+    payload
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// POST /recommend — runai's remote skill router.
+///
+/// Body: the standard Claude Code UserPromptSubmit hook JSON (fields used:
+/// `prompt`, `session_id`, `cwd`, `transcript_path`).
+///
+/// Optional `X-Runai-User: {user}@{host}` header — when present, the
+/// teammate's identity is prefixed into the `session_id` so multiple
+/// teammates' sessions don't collide in the router's per-session memory.
+/// The install script writes this header automatically; manual callers can
+/// omit it.
+///
+/// Returns the hook output string (markdown to be injected into the
+/// teammate's Claude Code prompt) as plain text. Errors fall through to
+/// 200 + empty body — the install script's `--max-time 30 || true`
+/// pattern means a server hiccup never blocks the teammate's prompt.
+async fn handle_recommend(headers: HeaderMap, Json(payload): Json<serde_json::Value>) -> Response {
+    let user_prefix = headers
+        .get("X-Runai-User")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // recommend() is blocking (reqwest::blocking + rusqlite). Hop onto a
+    // blocking thread so the async runtime stays responsive.
+    let join = tokio::task::spawn_blocking(move || -> Result<String> {
+        let mgr = SkillManager::new()?;
+        let prompt = payload_str(&payload, "prompt");
+        if prompt.is_empty() {
+            return Ok(String::new());
+        }
+        let cwd = payload_str(&payload, "cwd");
+        let transcript = payload_str(&payload, "transcript_path");
+        let claude_sid = payload_str(&payload, "session_id");
+
+        // session_id is `{user_prefix}:{claude_sid}` when both present;
+        // either alone when only one; empty when neither (single-user
+        // local-test path).
+        let sid_string: String = match (user_prefix.is_empty(), claude_sid.is_empty()) {
+            (false, false) => format!("{user_prefix}:{claude_sid}"),
+            (false, true) => user_prefix.clone(),
+            (true, false) => claude_sid.clone(),
+            (true, true) => String::new(),
+        };
+
+        let tpath_pb = if transcript.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(&transcript))
+        };
+        let sid_opt = if sid_string.is_empty() {
+            None
+        } else {
+            Some(sid_string.as_str())
+        };
+        let cwd_opt = if cwd.is_empty() {
+            None
+        } else {
+            Some(cwd.as_str())
+        };
+
+        let decision = recommend::recommend(&mgr, &prompt, tpath_pb.as_deref(), sid_opt, cwd_opt)?;
+
+        let history = match sid_opt {
+            Some(s) if !s.is_empty() => mgr
+                .db()
+                .router_session_recommended_skills(s)
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+
+        Ok(recommend::format_for_hook_full(
+            &decision,
+            sid_opt.unwrap_or(""),
+            &history,
+        ))
+    })
+    .await;
+
+    let body = match join {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            eprintln!("/recommend: recommend() failed: {e:#}");
+            String::new()
+        }
+        Err(e) => {
+            eprintln!("/recommend: spawn_blocking join failed: {e}");
+            String::new()
+        }
+    };
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
+}
+
+/// GET /install — return the client install bash script with `{SERVER_URL}`
+/// substituted by the URL the request came in on. Teammate runs:
+///   curl -fsSL http://<server>:<port>/install | bash
+async fn handle_install_script(headers: HeaderMap) -> Response {
+    let server_url = guess_server_url(&headers);
+    let body = CLIENT_INSTALL_SH.replace("{SERVER_URL}", &server_url);
+    (
+        [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+/// GET /uninstall — return the client uninstall bash script. Reverses
+/// /install: removes the hook entry from Claude Code settings.json and
+/// deletes ~/.runai-hook.sh.
+async fn handle_uninstall_script() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        CLIENT_UNINSTALL_SH.to_string(),
+    )
+        .into_response()
+}
+
+/// Reconstruct the URL the teammate curl'd from so the install script ends
+/// up hard-coded with the same `http://host:port` they used. Falls back to
+/// the `Host` header (curl always sets this); scheme defaults to `http`
+/// since there's no TLS in front of runai by default — LAN deploys.
+fn guess_server_url(headers: &HeaderMap) -> String {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("127.0.0.1:17888");
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("http");
+    format!("{scheme}://{host}")
 }
 
 async fn api_event_by_id(
