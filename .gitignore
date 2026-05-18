@@ -6,3 +6,4 @@ docs/superpowers/
 *.db
 .beads-credential-key
 .design-gateway/
+.claude/
