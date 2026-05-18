@@ -1377,7 +1377,7 @@ pub fn format_for_hook_full(
         String::new()
     } else {
         format!(
-            "\n本 session 之前 runai 已经推过这些 skill（已在你上下文中，可参考但通常不需要再 Read）: {}",
+            "\n本 session 之前 runai 已经推过这些 skill（候选名你已经看过，没 Read 过 SKILL.md）: {}\n如果当前 prompt 跟其中某个对口，直接跑 `CLAUDE_SESSION_ID={session_id} runai recommend get <name>` 激活，**不要用 Read 工具找路径** —— runai 不公开路径。",
             history_filtered.join(", ")
         )
     };
